@@ -128,6 +128,15 @@ input, select { font-family: inherit; }
 .player-row input { flex: 1; background: none; border: none; color: var(--txt); font-size: 1.02rem; font-weight: 500; padding: 10px 0; outline: none; min-width: 0; }
 .player-row .del { width: 42px; height: 42px; border-radius: 10px; color: var(--txt-faint); font-size: 1.2rem; flex-shrink: 0; }
 .player-row .del:active { color: var(--red); background: var(--bg2); }
+.skill-badge {
+  width: 40px; height: 42px; border-radius: 10px; flex-shrink: 0;
+  font-family: var(--disp); font-weight: 800; font-size: 1.25rem;
+  background: var(--bg2); border: 1px solid var(--line); color: var(--txt-faint);
+  transition: all .12s;
+}
+.skill-badge.sk3 { color: var(--lime); border-color: rgba(205,245,69,.45); background: rgba(205,245,69,.08); }
+.skill-badge.sk1 { color: var(--amber); border-color: rgba(245,185,69,.45); background: rgba(245,185,69,.08); }
+.skill-badge:active { transform: scale(.94); }
 .preset-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .preset-row .chipbtn {
   font-family: var(--disp); font-weight: 700; font-size: 1.12rem; font-variant-numeric: tabular-nums;
@@ -528,6 +537,9 @@ const Engine = (() => {
 
   // ---------- creation ----------
 
+  /** skill levels are relative to the group: 1 = weaker, 2 = middle, 3 = stronger */
+  function clampSkill(v) { return v === 1 || v === 3 ? v : 2; }
+
   function createTournament(config) {
     const cfg = Object.assign({
       format: 'americano',          // 'americano' | 'mexicano'
@@ -536,20 +548,26 @@ const Engine = (() => {
       scoreEntry: 'combined',       // 'combined' | 'free'
       ranking: 'points',            // 'points' | 'wins'
       restPoints: 0,                // points granted per sit-out (0 = off)
+      useSkills: false,             // balance Americano draws by player skill
       plannedRounds: 8,
       courtNames: [],
       name: 'Americano',
     }, config || {});
 
-    const names = (config && config.players || []).map(n => String(n).trim()).filter(Boolean);
-    if (names.length < 4) throw new Error('Need at least 4 players');
+    // players: array of strings, or {name, skill} objects when skill levels are used
+    const roster = (config && config.players || [])
+      .map(p => (p && typeof p === 'object')
+        ? { name: String(p.name || '').trim(), skill: clampSkill(p.skill) }
+        : { name: String(p).trim(), skill: 2 })
+      .filter(p => p.name);
+    if (roster.length < 4) throw new Error('Need at least 4 players');
     if (cfg.pointsPerMatch < 2) throw new Error('Points per match must be at least 2');
 
     const t = {
       id: 't' + Date.now().toString(36),
       createdAt: config && config.createdAt || null,
       config: cfg,
-      players: names.map(n => ({ id: uid(), name: n, active: true })),
+      players: roster.map(p => ({ id: uid(), name: p.name, active: true, skill: p.skill })),
       rounds: [],
       finished: false,
     };
@@ -638,6 +656,18 @@ const Engine = (() => {
         cost += c * c;
       }
     }
+    if (counts.useSkills) {
+      // Penalize lopsided matchups: compare team skill sums. A 1-step gap is
+      // normal padel; bigger gaps (e.g. the two strongest vs the two weakest,
+      // diff 4) cost more than a repeated partner, so they are avoided first.
+      for (const [pa, pb] of matchups) {
+        const diff = Math.abs(
+          counts.skill[pa[0]] + counts.skill[pa[1]] -
+          counts.skill[pb[0]] - counts.skill[pb[1]]);
+        const over = Math.max(0, diff - 1);
+        cost += 40 * over * over;
+      }
+    }
     return cost;
   }
 
@@ -656,6 +686,9 @@ const Engine = (() => {
 
   function bestAmericanoMatches(t, ids, rng) {
     const counts = historyCounts(t);
+    counts.useSkills = !!t.config.useSkills;
+    counts.skill = {};
+    for (const p of t.players) counts.skill[p.id] = p.skill || 2;
 
     if (ids.length <= 12) {
       // Exhaustive: <= 10395 matchings x <= 15 groupings.
@@ -848,13 +881,19 @@ const Engine = (() => {
   }
 
   /** Add a player mid-tournament. Returns the new player. */
-  function addPlayer(t, name, rng) {
+  function addPlayer(t, name, rng, skill) {
     name = String(name).trim();
     if (!name) throw new Error('Name required');
-    const p = { id: uid(), name, active: true };
+    const p = { id: uid(), name, active: true, skill: clampSkill(skill) };
     t.players.push(p);
     if (dropUnscoredTrailingRound(t)) generateRound(t, rng);
     return p;
+  }
+
+  function setSkill(t, pid, skill) {
+    const p = t.players.find(x => x.id === pid);
+    if (!p) throw new Error('No such player');
+    p.skill = clampSkill(skill);
   }
 
   /** Deactivate a player: kept in standings, excluded from future rounds. */
@@ -904,7 +943,7 @@ const Engine = (() => {
   return {
     createTournament, generateRound, regenerateRound, setScore, clearScore,
     roundComplete, standings, addPlayer, removePlayer, reactivatePlayer,
-    renamePlayer, setCourts, activePlayers,
+    renamePlayer, setCourts, setSkill, activePlayers,
     courtsUsed, historyCounts, playerName, anyScores,
   };
 })();
@@ -929,7 +968,15 @@ const store = {
   lastPlayers() {
     try { return JSON.parse(localStorage.getItem(LS.LAST_PLAYERS)) || []; } catch { return []; }
   },
-  saveLastPlayers(names) { localStorage.setItem(LS.LAST_PLAYERS, JSON.stringify(names)); },
+  lastSkills() {
+    try { return JSON.parse(localStorage.getItem('americano.lastSkills')) || {}; } catch { return {}; }
+  },
+  lastUseSkills() { return localStorage.getItem('americano.lastUseSkills') === '1'; },
+  saveLastPlayers(names, skillsByName, useSkills) {
+    localStorage.setItem(LS.LAST_PLAYERS, JSON.stringify(names));
+    if (skillsByName) localStorage.setItem('americano.lastSkills', JSON.stringify(skillsByName));
+    if (useSkills !== undefined) localStorage.setItem('americano.lastUseSkills', useSkills ? '1' : '0');
+  },
   history() {
     try { return JSON.parse(localStorage.getItem(LS.HISTORY)) || []; } catch { return []; }
   },
@@ -959,7 +1006,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v12 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v13 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1008,10 +1055,17 @@ function pname(pid) { return T ? esc(Engine.playerName(T, pid)) : '?'; }
 
 /* ---------------- setup ---------------- */
 
+const SKILL_GLYPH = { 1: '−', 2: '•', 3: '+' };
+const nextSkill = s => (s === 2 ? 3 : s === 3 ? 1 : 2); // tap to cycle • → + → −
+
 function defaultSetup() {
   const last = store.lastPlayers();
+  const lastSk = store.lastSkills();
+  const players = last.length >= 4 ? last.slice() : ['', '', '', ''];
   return {
-    players: last.length >= 4 ? last.slice() : ['', '', '', ''],
+    players,
+    skills: players.map(n => lastSk[String(n).toLowerCase()] || 2),
+    useSkills: store.lastUseSkills(),
     courts: 2,
     format: 'americano',
     pointsPerMatch: 24,
@@ -1048,11 +1102,17 @@ function renderSetup() {
 
       <div class="setup-players">
       <div class="field-label">Players <span class="hint">${filled} entered ${filled >= 4 ? '' : '(need 4+)'}</span></div>
+      <div class="seg" id="seg-skillmode" style="margin-bottom:10px">
+        <button data-v="0" class="${!s.useSkills ? 'on' : ''}">No skill levels</button>
+        <button data-v="1" class="${s.useSkills ? 'on' : ''}">Skill levels</button>
+      </div>
+      ${s.useSkills ? `<div class="setup-note" style="margin:0 0 10px">Tap a player’s badge to cycle — <b style="color:var(--lime)">+</b> stronger · <b>•</b> middle · <b style="color:var(--amber)">−</b> weaker, relative to your group. Draws then avoid lopsided matches (the strongest two never gang up on the weakest two).</div>` : ''}
       <div id="player-list">
         ${s.players.map((n, i) => `
           <div class="player-row">
             <span class="pnum">${i + 1}</span>
             <input data-pi="${i}" value="${esc(n)}" placeholder="Player name" autocomplete="off" enterkeyhint="next">
+            ${s.useSkills ? `<button class="skill-badge sk${s.skills[i]}" data-sk="${i}">${SKILL_GLYPH[s.skills[i]]}</button>` : ''}
             <button class="del" data-del="${i}" aria-label="Remove">✕</button>
           </div>`).join('')}
       </div>
@@ -1135,17 +1195,29 @@ function renderSetup() {
     inp.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         const i = +e.target.dataset.pi;
-        if (i === s.players.length - 1) { s.players.push(''); renderSetup(); focusPlayer(s.players.length - 1); }
+        if (i === s.players.length - 1) { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); }
         else focusPlayer(i + 1);
       }
     });
   });
   app.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', e => {
-    s.players.splice(+e.currentTarget.dataset.del, 1);
-    if (s.players.length === 0) s.players.push('');
+    const i = +e.currentTarget.dataset.del;
+    s.players.splice(i, 1);
+    s.skills.splice(i, 1);
+    if (s.players.length === 0) { s.players.push(''); s.skills.push(2); }
     renderSetup();
   }));
-  $('#add-player-row').addEventListener('click', () => { s.players.push(''); renderSetup(); focusPlayer(s.players.length - 1); });
+  $('#add-player-row').addEventListener('click', () => { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); });
+  $('#seg-skillmode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    s.useSkills = b.dataset.v === '1';
+    renderSetup();
+  }));
+  app.querySelectorAll('[data-sk]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.sk;
+    s.skills[i] = nextSkill(s.skills[i]);
+    b.className = 'skill-badge sk' + s.skills[i];
+    b.textContent = SKILL_GLYPH[s.skills[i]];
+  }));
   $('#courts-stepper').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     s.courts = Math.min(6, Math.max(1, s.courts + (+b.dataset.step)));
     renderSetup();
@@ -1191,12 +1263,14 @@ function renderSetup() {
 
 function startTournament() {
   const s = setupState;
-  const names = s.players.map(n => n.trim()).filter(Boolean);
+  const roster = s.players.map((n, i) => ({ name: n.trim(), skill: s.skills[i] || 2 })).filter(r => r.name);
+  const names = roster.map(r => r.name);
   const lower = names.map(n => n.toLowerCase());
   if (new Set(lower).size !== lower.length) { toast('Player names must be unique', true); return; }
   mutate(() => {
     T = Engine.createTournament({
-      players: names,
+      players: s.useSkills ? roster : names,
+      useSkills: s.useSkills,
       courts: s.courts,
       format: s.format,
       pointsPerMatch: s.pointsPerMatch,
@@ -1208,7 +1282,7 @@ function startTournament() {
     });
     T.config.durationMin = s.durationMin;
     Engine.generateRound(T);
-    store.saveLastPlayers(names);
+    store.saveLastPlayers(names, Object.fromEntries(roster.map(r => [r.name.toLowerCase(), r.skill])), s.useSkills);
     tab = 'rounds';
     viewRound = 0;
   });
@@ -1749,7 +1823,7 @@ function openPlayersSheet(editPid) {
           ${p.id === editPid
             ? `<button class="del" id="pl-save" style="color:var(--lime)">✓</button>`
             : p.active
-              ? `<button class="del" data-ed="${p.id}">✎</button><button class="del" data-rm="${p.id}">✕</button>`
+              ? `${T.config.useSkills ? `<button class="skill-badge sk${p.skill || 2}" data-skp="${p.id}">${SKILL_GLYPH[p.skill || 2]}</button>` : ''}<button class="del" data-ed="${p.id}">✎</button><button class="del" data-rm="${p.id}">✕</button>`
               : `<button class="del" data-rj="${p.id}" style="color:var(--lime);font-size:.9rem;width:auto;padding:0 12px">↩ rejoin</button>`}
         </div>`).join('')}
     </div>
@@ -1766,6 +1840,12 @@ function openPlayersSheet(editPid) {
     });
   }));
   ov.querySelectorAll('[data-ed]').forEach(b => b.addEventListener('click', () => openPlayersSheet(b.dataset.ed)));
+  ov.querySelectorAll('[data-skp]').forEach(b => b.addEventListener('click', () => {
+    const p = T.players.find(x => x.id === b.dataset.skp);
+    const ns = nextSkill(p.skill || 2);
+    mutate(() => Engine.setSkill(T, p.id, ns));
+    openPlayersSheet();
+  }));
   ov.querySelectorAll('[data-rj]').forEach(b => b.addEventListener('click', () => {
     const p = T.players.find(x => x.id === b.dataset.rj);
     mutate(() => Engine.reactivatePlayer(T, p.id));
@@ -1811,6 +1891,12 @@ function openSettingsSheet() {
       <button data-v="points" class="${c.ranking === 'points' ? 'on' : ''}">Total points</button>
       <button data-v="wins" class="${c.ranking === 'wins' ? 'on' : ''}">Wins first</button>
     </div>
+    <div class="field-label">Balanced draws (skill levels)</div>
+    <div class="seg" id="set-skillmode">
+      <button data-v="0" class="${!c.useSkills ? 'on' : ''}">Off</button>
+      <button data-v="1" class="${c.useSkills ? 'on' : ''}">On</button>
+    </div>
+    <div class="setup-note">Set each player's badge in Menu → Players (+ stronger · • middle · − weaker). Americano draws then avoid obviously lopsided matches. Mexicano ignores this — its standings already balance courts.</div>
     <div class="field-label">Sit-out compensation</div>
     <div class="seg" id="set-rest">
       <button data-v="0" class="${!c.restPoints ? 'on' : ''}">None</button>
@@ -1832,6 +1918,10 @@ function openSettingsSheet() {
   }));
   ov.querySelector('#set-ranking').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     mutate(() => { T.config.ranking = b.dataset.v; });
+    openSettingsSheet();
+  }));
+  ov.querySelector('#set-skillmode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    mutate(() => { T.config.useSkills = b.dataset.v === '1'; });
     openSettingsSheet();
   }));
   ov.querySelector('#set-rest').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
@@ -1856,6 +1946,7 @@ function openHelpSheet() {
       <p><b>Sitting out</b> — earns nothing by default. If your group prefers, switch on compensation in Settings (+half the match points per rest — neutral, so resting is never an advantage).</p>
       <p><b>Scores</b> — tap any court card to enter or fix a score, in any round, anytime. Standings always recompute from the raw scores.</p>
       <p><b>Players</b> — Menu → Players to add, rename, remove or rejoin someone mid-session. Draws adapt from the next round; results already played are kept.</p>
+      <p><b>Skill levels (optional)</b> — turn on at setup or in Settings, then give each player a badge: <b>+</b> stronger, <b>•</b> middle, <b>−</b> weaker — always relative to your group, not an official rating. Americano draws then avoid obviously lopsided matches (the two strongest never team up against the two weakest), while still rotating partners. A one-step gap is considered normal padel and stays allowed.</p>
       <p><b>Tie-breakers</b> — total points, then point difference, then wins. (Or wins first — see Settings.)</p>
       <p><b>Session timer</b> — the ⏳ chip in the header counts down the session length you picked at setup (tap it for details). Above an hour it shows h:mm; in the last hour it counts down minutes:seconds; after time it shows +overtime. The blinking dots are its heartbeat. It's just a guide — play as long as you like.</p>
       <p><b>Your data</b> — everything saves automatically in this browser. Use Menu → Export backup to move a tournament to another device or keep a record.</p>
@@ -1996,7 +2087,11 @@ function finishTournament() {
   mutate(() => {
     T.finished = true;
     store.archive(T);
-    store.saveLastPlayers(Engine.activePlayers(T).map(p => p.name));
+    const act = Engine.activePlayers(T);
+    store.saveLastPlayers(
+      act.map(p => p.name),
+      Object.fromEntries(act.map(p => [p.name.toLowerCase(), p.skill || 2])),
+      T.config.useSkills);
   });
 }
 

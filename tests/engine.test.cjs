@@ -390,6 +390,77 @@ console.log('== Performance: 24 players, 6 courts ==');
   ok(maxPartner <= 2, `24p: pair partnered ${maxPartner}x in 10 rounds`);
 }
 
+// ----------------------------------------------------------- skill balancing
+console.log('== Skill-balanced draws ==');
+{
+  // 4 players: two strong (3) and two weak (1). Balanced engine must NEVER
+  // team the two strongest together in round 1 (free choice, no history).
+  for (let trial = 0; trial < 30; trial++) {
+    const rng = mulberry32(9000 + trial);
+    const t = E.createTournament({
+      players: [{ name: 'S1', skill: 3 }, { name: 'S2', skill: 3 }, { name: 'W1', skill: 1 }, { name: 'W2', skill: 1 }],
+      courts: 1, useSkills: true,
+    });
+    const r = E.generateRound(t, rng);
+    const skill = {};
+    t.players.forEach(p => { skill[p.id] = p.skill; });
+    for (const m of r.matches) {
+      const sumA = skill[m.teamA[0]] + skill[m.teamA[1]];
+      const sumB = skill[m.teamB[0]] + skill[m.teamB[1]];
+      ok(Math.abs(sumA - sumB) === 0, `skill 4p trial ${trial}: lopsided draw ${sumA} vs ${sumB}`);
+    }
+  }
+  // default skill for plain strings + clamping + setSkill
+  const t = E.createTournament({ players: names(4), useSkills: true });
+  ok(t.players.every(p => p.skill === 2), 'string players default to middle skill');
+  E.setSkill(t, t.players[0].id, 3);
+  ok(t.players[0].skill === 3, 'setSkill applies');
+  E.setSkill(t, t.players[0].id, 99);
+  ok(t.players[0].skill === 2, 'invalid skill clamps to middle');
+
+  // 10 players, mixed skills, full 8-round session: no obviously lopsided
+  // match (team-sum diff >= 3) should ever be drawn.
+  let worstDiff = 0, partnerMax = 0;
+  for (let trial = 0; trial < 40; trial++) {
+    const rng = mulberry32(7700 + trial);
+    const skills = [3, 3, 3, 2, 2, 2, 2, 1, 1, 1];
+    const t10 = E.createTournament({
+      players: skills.map((s, i) => ({ name: 'P' + (i + 1), skill: s })),
+      courts: 2, useSkills: true, pointsPerMatch: 24,
+    });
+    const skill = {};
+    t10.players.forEach(p => { skill[p.id] = p.skill; });
+    for (let r = 0; r < 8; r++) {
+      const round = E.generateRound(t10, rng);
+      for (const m of round.matches) {
+        const diff = Math.abs(skill[m.teamA[0]] + skill[m.teamA[1]] - skill[m.teamB[0]] - skill[m.teamB[1]]);
+        worstDiff = Math.max(worstDiff, diff);
+      }
+      for (let mi = 0; mi < round.matches.length; mi++) E.setScore(t10, r, mi, 14, 10);
+    }
+    partnerMax = Math.max(partnerMax, ...Object.values(E.historyCounts(t10).partner));
+  }
+  ok(worstDiff <= 2, `skill-balanced 10p: lopsided match drawn (diff ${worstDiff})`);
+  ok(partnerMax <= 2, `skill-balanced 10p: partner repeated ${partnerMax}x`);
+  console.log(`  10p/8r x40 trials: worst team-sum diff=${worstDiff}, max partner repeats=${partnerMax}`);
+
+  // with useSkills OFF the engine ignores skills: across many seeds the two
+  // strongest DO sometimes get paired (proves the term is gated by the flag)
+  let stackedSeen = false;
+  for (let trial = 0; trial < 60 && !stackedSeen; trial++) {
+    const rng = mulberry32(31000 + trial);
+    const t4 = E.createTournament({
+      players: [{ name: 'S1', skill: 3 }, { name: 'S2', skill: 3 }, { name: 'W1', skill: 1 }, { name: 'W2', skill: 1 }],
+      courts: 1, useSkills: false,
+    });
+    const r = E.generateRound(t4, rng);
+    const skill = {};
+    t4.players.forEach(p => { skill[p.id] = p.skill; });
+    stackedSeen = r.matches.some(m => skill[m.teamA[0]] + skill[m.teamA[1]] === 6 || skill[m.teamB[0]] + skill[m.teamB[1]] === 6);
+  }
+  ok(stackedSeen, 'useSkills off: skills correctly ignored (stacked pair seen)');
+}
+
 // ------------------------------------------------------------------- guards
 console.log('== Creation guards ==');
 {
