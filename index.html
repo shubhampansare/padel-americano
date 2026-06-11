@@ -312,7 +312,25 @@ body.sheet-lock { position: fixed; left: 0; right: 0; overflow: hidden; }
 }
 .score-team .pmrow button:active { background: var(--steel); color: var(--lime); }
 .score-colon { display: flex; align-items: center; justify-content: center; font-family: var(--disp); font-size: 1.6rem; color: var(--txt-faint); font-weight: 700; }
-.score-slider { width: 100%; margin: 14px 0 4px; accent-color: var(--lime); height: 30px; }
+.score-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; margin: 16px 0 6px; height: 30px; background: transparent; cursor: pointer;
+  --trk: linear-gradient(90deg, var(--steel) 0 100%);
+}
+.score-slider::-webkit-slider-runnable-track {
+  height: 10px; border-radius: 5px; background: var(--trk);
+  border: 1px solid rgba(232,237,242,.08);
+}
+.score-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--lime); border: 2px solid #15200a; margin-top: -9px;
+  box-shadow: 0 0 12px rgba(205,245,69,.45);
+}
+.score-slider::-moz-range-track { height: 10px; border-radius: 5px; background: var(--trk); }
+.score-slider::-moz-range-thumb {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--lime); border: 2px solid #15200a; box-shadow: 0 0 12px rgba(205,245,69,.45);
+}
 .sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
 .sheet-actions .btn { flex: 1; }
 
@@ -941,7 +959,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v9 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v10 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1547,13 +1565,25 @@ function renderScoreSheet() {
   }));
   const bnA = $('#bn-a'), bnB = $('#bn-b');
   const slider = $('#score-slider');
+  const sliderBg = () => {
+    // winning team's half of the track glows lime (matches the big-number highlight);
+    // a center tick marks the draw point
+    if (!slider) return;
+    const lime = 'rgba(205,245,69,.45)', dim = 'rgba(46,56,66,1)', mark = 'rgba(232,237,242,.4)';
+    const l = scoreCtx.a > scoreCtx.b ? lime : dim;
+    const r = scoreCtx.b > scoreCtx.a ? lime : dim;
+    slider.style.setProperty('--trk',
+      `linear-gradient(90deg, ${l} 0 calc(50% - 1.5px), ${mark} calc(50% - 1.5px) calc(50% + 1.5px), ${r} calc(50% + 1.5px) 100%)`);
+  };
   const lightUpdate = () => { // keep typing/drag smooth without a full re-render
     if (document.activeElement !== bnA) bnA.value = scoreCtx.a;
     if (document.activeElement !== bnB) bnB.value = scoreCtx.b;
     if (slider) slider.value = scoreCtx.a;
+    sliderBg();
     ov.querySelector('#st-a').classList.toggle('winning', scoreCtx.a > scoreCtx.b);
     ov.querySelector('#st-b').classList.toggle('winning', scoreCtx.b > scoreCtx.a);
   };
+  sliderBg(); // initial state (e.g. editing an existing score)
   if (slider) slider.addEventListener('input', e => {
     scoreCtx.a = +e.target.value; scoreCtx.b = N - scoreCtx.a;
     lightUpdate();
