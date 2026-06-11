@@ -1006,7 +1006,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v13 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v14 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1066,6 +1066,7 @@ function defaultSetup() {
     players,
     skills: players.map(n => lastSk[String(n).toLowerCase()] || 2),
     useSkills: store.lastUseSkills(),
+    restComp: false,
     courts: 2,
     format: 'americano',
     pointsPerMatch: 24,
@@ -1158,6 +1159,15 @@ function renderSetup() {
         <button data-v="wins" class="${s.ranking === 'wins' ? 'on' : ''}">Wins first</button>
       </div>
 
+      <div class="field-label">Sit-out points</div>
+      <div class="seg" id="seg-restcomp">
+        <button data-v="0" class="${!s.restComp ? 'on' : ''}">None</button>
+        <button data-v="1" class="${s.restComp ? 'on' : ''}">+${Math.floor(s.pointsPerMatch / 2)} per rest</button>
+      </div>
+      <div class="setup-note">${s.restComp
+        ? 'Each sit-out credits <b>half the match points</b> — the average score — so resting is neutral: it neither costs nor pays.'
+        : 'When rounds don’t divide evenly, some players get one game more than others. Compensation levels that out; or keep it off and pick a round count where everyone rests equally.'}</div>
+
       <div class="field-label">Session</div>
       <div class="seg" id="seg-duration">
         ${[90, 120, 150].map(d => `<button data-v="${d}" class="${s.durationMin === d ? 'on' : ''}">${d / 60}h</button>`).join('')}
@@ -1210,6 +1220,10 @@ function renderSetup() {
   $('#add-player-row').addEventListener('click', () => { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); });
   $('#seg-skillmode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     s.useSkills = b.dataset.v === '1';
+    renderSetup();
+  }));
+  $('#seg-restcomp').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    s.restComp = b.dataset.v === '1';
     renderSetup();
   }));
   app.querySelectorAll('[data-sk]').forEach(b => b.addEventListener('click', () => {
@@ -1271,6 +1285,7 @@ function startTournament() {
     T = Engine.createTournament({
       players: s.useSkills ? roster : names,
       useSkills: s.useSkills,
+      restPoints: s.restComp ? Math.floor(s.pointsPerMatch / 2) : 0,
       courts: s.courts,
       format: s.format,
       pointsPerMatch: s.pointsPerMatch,
