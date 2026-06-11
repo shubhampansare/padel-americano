@@ -959,7 +959,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v10 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v11 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1566,14 +1566,18 @@ function renderScoreSheet() {
   const bnA = $('#bn-a'), bnB = $('#bn-b');
   const slider = $('#score-slider');
   const sliderBg = () => {
-    // winning team's half of the track glows lime (matches the big-number highlight);
-    // a center tick marks the draw point
+    // track fills lime from the winning team's end up to the thumb
+    // (thumb right => left side fills; thumb left => right side fills);
+    // a faint center tick marks the draw point
     if (!slider) return;
-    const lime = 'rgba(205,245,69,.45)', dim = 'rgba(46,56,66,1)', mark = 'rgba(232,237,242,.4)';
-    const l = scoreCtx.a > scoreCtx.b ? lime : dim;
-    const r = scoreCtx.b > scoreCtx.a ? lime : dim;
+    const lime = 'rgba(205,245,69,.6)', dim = 'rgba(46,56,66,1)', mark = 'rgba(232,237,242,.4)';
+    const p = (scoreCtx.a / N) * 100;
+    let stops;
+    if (scoreCtx.a > scoreCtx.b) stops = `${lime} 0 ${p}%, ${dim} ${p}% 100%`;
+    else if (scoreCtx.b > scoreCtx.a) stops = `${dim} 0 ${p}%, ${lime} ${p}% 100%`;
+    else stops = `${dim} 0 100%`;
     slider.style.setProperty('--trk',
-      `linear-gradient(90deg, ${l} 0 calc(50% - 1.5px), ${mark} calc(50% - 1.5px) calc(50% + 1.5px), ${r} calc(50% + 1.5px) 100%)`);
+      `linear-gradient(90deg, transparent 0 calc(50% - 1.5px), ${mark} calc(50% - 1.5px) calc(50% + 1.5px), transparent calc(50% + 1.5px) 100%), linear-gradient(90deg, ${stops})`);
   };
   const lightUpdate = () => { // keep typing/drag smooth without a full re-render
     if (document.activeElement !== bnA) bnA.value = scoreCtx.a;
