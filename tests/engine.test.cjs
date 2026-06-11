@@ -369,6 +369,32 @@ console.log('== Rest compensation ==');
   const resterId = t2.rounds[0].resting[0];
   const row = E.standings(t2).find(s => s.player.id === resterId);
   ok(row.points === 0, 'no compensation by default');
+
+  // restMode 'half' === legacy restPoints behaviour
+  const th = E.createTournament({ players: names(5), courts: 1, pointsPerMatch: 24, restMode: 'half' });
+  for (let r = 0; r < 5; r++) { E.generateRound(th, rng); E.setScore(th, r, 0, 14, 10); }
+  for (const s of E.standings(th)) {
+    ok(s.points === s.pf + s.rests * 12, `restMode half: ${s.player.name} ${s.points} != ${s.pf + s.rests * 12}`);
+  }
+
+  // restMode 'avg': each rest credits the player's own points-per-game;
+  // zero-game resters fall back to half the match total
+  const ta = E.createTournament({ players: names(5), courts: 1, pointsPerMatch: 24, restMode: 'avg' });
+  E.generateRound(ta, rng);
+  const r1rester = ta.rounds[0].resting[0];
+  E.setScore(ta, 0, 0, 18, 6);
+  let rows = E.standings(ta);
+  ok(Math.abs(rows.find(s => s.player.id === r1rester).points - 12) < 1e-9,
+    'avg mode: zero-game rester credited half the match total');
+  for (let r = 1; r < 5; r++) { E.generateRound(ta, rng); E.setScore(ta, r, 0, 18, 6); }
+  rows = E.standings(ta);
+  for (const s of rows) {
+    const expected = s.pf + s.rests * (s.played ? s.pf / s.played : 12);
+    ok(Math.abs(s.points - expected) < 1e-9, `avg mode: ${s.player.name} ${s.points} != ${expected}`);
+  }
+  // switching the mode off restores raw points
+  ta.config.restMode = 'none';
+  ok(E.standings(ta).every(s => s.points === s.pf), 'mode switch back to none = raw points');
 }
 
 // ------------------------------------------------------------------ perf 24p

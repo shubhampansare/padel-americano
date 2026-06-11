@@ -547,7 +547,7 @@ const Engine = (() => {
       pointsPerMatch: 24,
       scoreEntry: 'combined',       // 'combined' | 'free'
       ranking: 'points',            // 'points' | 'wins'
-      restPoints: 0,                // points granted per sit-out (0 = off)
+      restMode: 'none',             // sit-out credit: 'none' | 'half' (fixed N/2) | 'avg' (player's own average)
       useSkills: false,             // balance Americano draws by player skill
       plannedRounds: 8,
       courtNames: [],
@@ -853,10 +853,18 @@ const Engine = (() => {
       }
     }
     const rows = Object.values(stats);
-    const restPts = t.config.restPoints || 0;
+    // sit-out credit: 'half' = fixed half the match total (neutral in expectation);
+    // 'avg' = the player's own points-per-game so far (equivalent to ranking by
+    // average when games are uneven; falls back to half before their first game).
+    // legacy tournaments stored a restPoints number — treat >0 as 'half'.
+    const mode = (t.config.restMode && t.config.restMode !== 'none')
+      ? t.config.restMode
+      : (t.config.restPoints > 0 ? 'half' : 'none');
+    const half = Math.floor((t.config.pointsPerMatch || 24) / 2);
     for (const s of rows) {
       s.diff = s.pf - s.pa;
-      s.points += s.rests * restPts;   // neutral sit-out compensation (optional)
+      if (mode === 'half') s.points += s.rests * half;
+      else if (mode === 'avg') s.points += s.rests * (s.played ? s.pf / s.played : half);
     }
     const byPoints = (x, y) =>
       (y.points - x.points) || (y.diff - x.diff) || (y.wins - x.wins) ||
@@ -988,8 +996,8 @@ const store = {
       name: t.config.name,
       format: t.config.format,
       players: t.players.length,
-      podium: st.slice(0, 3).map(s => `${s.player.name} (${s.points})`),
-      full: st.map(s => `${s.player.name} ${s.points}pts ${s.wins}W`),
+      podium: st.slice(0, 3).map(s => `${s.player.name} (${Math.round(s.points)})`),
+      full: st.map(s => `${s.player.name} ${Math.round(s.points)}pts ${s.wins}W`),
     });
     localStorage.setItem(LS.HISTORY, JSON.stringify(h.slice(0, 20)));
   },
@@ -1006,7 +1014,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v14 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v15 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1066,7 +1074,7 @@ function defaultSetup() {
     players,
     skills: players.map(n => lastSk[String(n).toLowerCase()] || 2),
     useSkills: store.lastUseSkills(),
-    restComp: false,
+    restMode: 'none',
     courts: 2,
     format: 'americano',
     pointsPerMatch: 24,
@@ -1161,12 +1169,15 @@ function renderSetup() {
 
       <div class="field-label">Sit-out points</div>
       <div class="seg" id="seg-restcomp">
-        <button data-v="0" class="${!s.restComp ? 'on' : ''}">None</button>
-        <button data-v="1" class="${s.restComp ? 'on' : ''}">+${Math.floor(s.pointsPerMatch / 2)} per rest</button>
+        <button data-m="none" class="${s.restMode === 'none' ? 'on' : ''}">None</button>
+        <button data-m="half" class="${s.restMode === 'half' ? 'on' : ''}">+${Math.floor(s.pointsPerMatch / 2)} fixed</button>
+        <button data-m="avg" class="${s.restMode === 'avg' ? 'on' : ''}">Their avg</button>
       </div>
-      <div class="setup-note">${s.restComp
-        ? 'Each sit-out credits <b>half the match points</b> — the average score — so resting is neutral: it neither costs nor pays.'
-        : 'When rounds don’t divide evenly, some players get one game more than others. Compensation levels that out; or keep it off and pick a round count where everyone rests equally.'}</div>
+      <div class="setup-note">${{
+        none: 'When rounds don’t divide evenly, some players get one game more than others. Compensation levels that out.',
+        half: 'Each sit-out credits <b>half the match points</b> — the average score — so resting is neutral for everyone.',
+        avg: 'Each sit-out credits the player’s <b>own points-per-game so far</b> — like ranking by average. Strong players keep their pace while resting.',
+      }[s.restMode]} You can switch this anytime — in Settings during the match, or right on the standings.</div>
 
       <div class="field-label">Session</div>
       <div class="seg" id="seg-duration">
@@ -1223,7 +1234,7 @@ function renderSetup() {
     renderSetup();
   }));
   $('#seg-restcomp').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    s.restComp = b.dataset.v === '1';
+    s.restMode = b.dataset.m;
     renderSetup();
   }));
   app.querySelectorAll('[data-sk]').forEach(b => b.addEventListener('click', () => {
@@ -1285,7 +1296,7 @@ function startTournament() {
     T = Engine.createTournament({
       players: s.useSkills ? roster : names,
       useSkills: s.useSkills,
-      restPoints: s.restComp ? Math.floor(s.pointsPerMatch / 2) : 0,
+      restMode: s.restMode,
       courts: s.courts,
       format: s.format,
       pointsPerMatch: s.pointsPerMatch,
@@ -1569,7 +1580,7 @@ function renderStandingsTab() {
             <td class="pname">${esc(s.player.name)}${s.player.active ? '' : ' <span class="out">(left)</span>'}
               <div class="ptbar"><i style="width:${Math.round(100 * s.points / maxPts)}%"></i></div>
             </td>
-            <td class="pts">${s.points}</td>
+            <td class="pts">${Math.round(s.points)}</td>
             <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
             <td style="color:var(--txt-dim)">${mov}${s.wins}·${s.draws}·${s.losses}</td>
             ${hasRests ? `<td style="color:var(--txt-faint)">${s.rests}</td>` : ''}
@@ -1577,9 +1588,28 @@ function renderStandingsTab() {
         }).join('')}
       </tbody>
     </table>
-    <div class="setup-note" style="margin-top:14px">Ranked by ${T.config.ranking === 'wins' ? '<b>wins</b>, then points' : '<b>total points</b>'}, then point difference. ${T.config.restPoints
-      ? `Sitting out earns <b>+${T.config.restPoints} pts</b> (set in Settings).`
-      : 'Sitting out earns nothing — the draw keeps everyone’s games even (±1).'} Tap a match card to enter scores.</div>`;
+    ${hasRests ? (() => {
+      const mode = T.config.restMode || (T.config.restPoints > 0 ? 'half' : 'none');
+      const half = Math.floor(T.config.pointsPerMatch / 2);
+      return `
+    <div class="field-label" style="margin-top:16px">Sit-out points <span class="hint">recomputes live</span></div>
+    <div class="seg" id="stand-rest">
+      <button data-m="none" class="${mode === 'none' ? 'on' : ''}">None</button>
+      <button data-m="half" class="${mode === 'half' ? 'on' : ''}">+${half} fixed</button>
+      <button data-m="avg" class="${mode === 'avg' ? 'on' : ''}">Their avg</button>
+    </div>`;
+    })() : ''}
+    <div class="setup-note" style="margin-top:14px">Ranked by ${T.config.ranking === 'wins' ? '<b>wins</b>, then points' : '<b>total points</b>'}, then point difference. ${(() => {
+      const mode = T.config.restMode || (T.config.restPoints > 0 ? 'half' : 'none');
+      return mode === 'half' ? `Each sit-out credits <b>+${Math.floor(T.config.pointsPerMatch / 2)} pts</b> (fixed).`
+        : mode === 'avg' ? 'Each sit-out credits the player’s <b>own points-per-game</b>.'
+        : 'Sitting out earns nothing — the draw keeps everyone’s games even (±1).';
+    })()} Tap a match card to enter scores.</div>`;
+
+  const sr = c.querySelector('#stand-rest');
+  if (sr) sr.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    mutate(() => { T.config.restMode = b.dataset.m; T.config.restPoints = 0; });
+  }));
 }
 
 /* ---------------- score sheet ---------------- */
@@ -1833,7 +1863,7 @@ function openPlayersSheet(editPid) {
             ? `<input id="pl-edit" value="${esc(p.name)}" autocomplete="off" enterkeyhint="done">`
             : `<div style="flex:1;min-width:0">
                  <div style="font-weight:600">${esc(p.name)}${p.active ? '' : ' (left)'}</div>
-                 <div class="pstat">${byId[p.id].points} pts · ${byId[p.id].played} games · ${byId[p.id].rests} rests</div>
+                 <div class="pstat">${Math.round(byId[p.id].points)} pts · ${byId[p.id].played} games · ${byId[p.id].rests} rests</div>
                </div>`}
           ${p.id === editPid
             ? `<button class="del" id="pl-save" style="color:var(--lime)">✓</button>`
@@ -1893,6 +1923,7 @@ function openPlayersSheet(editPid) {
 function openSettingsSheet() {
   const c = T.config;
   const restVal = Math.max(1, Math.floor(c.pointsPerMatch / 2));
+  const restMode = c.restMode || (c.restPoints > 0 ? 'half' : 'none');
   const ov = sheet(`
     <div class="grab"></div>
     <h3>Settings</h3>
@@ -1914,10 +1945,11 @@ function openSettingsSheet() {
     <div class="setup-note">Set each player's badge in Menu → Players (+ stronger · • middle · − weaker). Americano draws then avoid obviously lopsided matches. Mexicano ignores this — its standings already balance courts.</div>
     <div class="field-label">Sit-out compensation</div>
     <div class="seg" id="set-rest">
-      <button data-v="0" class="${!c.restPoints ? 'on' : ''}">None</button>
-      <button data-v="${restVal}" class="${c.restPoints ? 'on' : ''}">+${restVal} pts per rest</button>
+      <button data-m="none" class="${restMode === 'none' ? 'on' : ''}">None</button>
+      <button data-m="half" class="${restMode === 'half' ? 'on' : ''}">+${restVal} fixed</button>
+      <button data-m="avg" class="${restMode === 'avg' ? 'on' : ''}">Their avg</button>
     </div>
-    <div class="setup-note">Half the match total per sit-out — levels out players who get fewer games, without making resting profitable.</div>
+    <div class="setup-note">Fixed: half the match total per sit-out — neutral for everyone. Their avg: each rest credits that player's own points-per-game — strong players keep their pace. Standings recompute instantly either way.</div>
     <div class="field-label">Round timer</div>
     <div class="seg" id="set-timer">
       ${[0, 10, 12, 15, 20].map(mn => `<button data-v="${mn}" class="${(c.roundTimerMin || 0) === mn ? 'on' : ''}">${mn ? mn + 'm' : 'Off'}</button>`).join('')}
@@ -1940,7 +1972,7 @@ function openSettingsSheet() {
     openSettingsSheet();
   }));
   ov.querySelector('#set-rest').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    mutate(() => { T.config.restPoints = +b.dataset.v; });
+    mutate(() => { T.config.restMode = b.dataset.m; T.config.restPoints = 0; });
     openSettingsSheet();
   }));
   ov.querySelector('#set-timer').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
@@ -1958,7 +1990,7 @@ function openHelpSheet() {
       <p><b>Mexicano</b> — round 1 is random; from round 2 the standings decide the draw: on each court, 1st+4th play 2nd+3rd of that group, so matches stay close.</p>
       <p><b>Serving</b> — one player serves <b>4 points in a row</b>, then the serve crosses to the other team. Partners take turns: each time the serve comes back to your team, the <em>other</em> partner serves. So a 24-point match goes: you serve 4 → opponent A serves 4 → your partner serves 4 → opponent B serves 4 → you again… until all points are played. Within your 4 serves, alternate service box (right, left, right, left) like normal padel. Who serves first? Spin a racket — it doesn't matter for the points. (If your group prefers 2-point serve turns, that's fine too — the app doesn't track serves.)</p>
       <p><b>Fair draws</b> — nobody sits out twice in a row, everyone's game count stays within ±1, and partners repeat only when mathematically unavoidable. Sit-out counts are shown next to resting players and in the standings.</p>
-      <p><b>Sitting out</b> — earns nothing by default. If your group prefers, switch on compensation in Settings (+half the match points per rest — neutral, so resting is never an advantage).</p>
+      <p><b>Sitting out</b> — earns nothing by default. Two compensation options (at setup, in Settings, or right on the standings — switch anytime, standings recompute instantly): <b>fixed</b> +half the match points per rest (neutral — resting neither costs nor pays), or <b>their avg</b> — each rest credits that player's own points-per-game, like ranking by average, so strong players keep their pace while resting.</p>
       <p><b>Scores</b> — tap any court card to enter or fix a score, in any round, anytime. Standings always recompute from the raw scores.</p>
       <p><b>Players</b> — Menu → Players to add, rename, remove or rejoin someone mid-session. Draws adapt from the next round; results already played are kept.</p>
       <p><b>Skill levels (optional)</b> — turn on at setup or in Settings, then give each player a badge: <b>+</b> stronger, <b>•</b> middle, <b>−</b> weaker — always relative to your group, not an official rating. Americano draws then avoid obviously lopsided matches (the two strongest never team up against the two weakest), while still rotating partners. A one-step gap is considered normal padel and stays allowed.</p>
@@ -2026,7 +2058,7 @@ function openTvMode() {
     <div class="tv-grid">
       <div>
         <table>
-          ${st.map((s, i) => `<tr><td class="rk">${i + 1}</td><td>${esc(s.player.name)}</td><td class="r">${s.points}</td></tr>`).join('')}
+          ${st.map((s, i) => `<tr><td class="rk">${i + 1}</td><td>${esc(s.player.name)}</td><td class="r">${Math.round(s.points)}</td></tr>`).join('')}
         </table>
       </div>
       <div>
@@ -2072,7 +2104,7 @@ function copyStandings() {
     `🎾 ${T.config.name} — ${new Date(T.createdAt || Date.now()).toLocaleDateString()}`,
     `${T.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${T.rounds.length} rounds · to ${T.config.pointsPerMatch} pts`,
     '',
-    ...st.map((s, i) => `${medals[i] || (i + 1) + '.'} ${s.player.name} — ${s.points} pts (${s.wins}W ${s.draws}D ${s.losses}L, ${s.diff > 0 ? '+' : ''}${s.diff})`),
+    ...st.map((s, i) => `${medals[i] || (i + 1) + '.'} ${s.player.name} — ${Math.round(s.points)} pts (${s.wins}W ${s.draws}D ${s.losses}L, ${s.diff > 0 ? '+' : ''}${s.diff})`),
   ];
   copyText(lines.join('\n'), 'Standings copied');
 }
@@ -2126,9 +2158,9 @@ function renderResults() {
         <h2>Final standings</h2>
         <div class="sub">${esc(T.config.name)} · ${T.rounds.length} rounds · ${new Date(T.createdAt || Date.now()).toLocaleDateString()}</div>
         <div class="podium">
-          ${p2 ? `<div class="pod p2"><div class="pname">${esc(p2.player.name)}</div><div class="ppts">${p2.points} pts</div><div class="block">2</div></div>` : ''}
-          ${p1 ? `<div class="pod p1"><div class="pname">${esc(p1.player.name)}</div><div class="ppts">${p1.points} pts</div><div class="block">1</div></div>` : ''}
-          ${p3 ? `<div class="pod p3"><div class="pname">${esc(p3.player.name)}</div><div class="ppts">${p3.points} pts</div><div class="block">3</div></div>` : ''}
+          ${p2 ? `<div class="pod p2"><div class="pname">${esc(p2.player.name)}</div><div class="ppts">${Math.round(p2.points)} pts</div><div class="block">2</div></div>` : ''}
+          ${p1 ? `<div class="pod p1"><div class="pname">${esc(p1.player.name)}</div><div class="ppts">${Math.round(p1.points)} pts</div><div class="block">1</div></div>` : ''}
+          ${p3 ? `<div class="pod p3"><div class="pname">${esc(p3.player.name)}</div><div class="ppts">${Math.round(p3.points)} pts</div><div class="block">3</div></div>` : ''}
         </div>
       </div>
       <table class="stand-table">
@@ -2138,7 +2170,7 @@ function renderResults() {
             <tr class="top${i + 1}">
               <td class="rank">${i + 1}</td>
               <td class="pname">${esc(s.player.name)}</td>
-              <td class="pts">${s.points}</td>
+              <td class="pts">${Math.round(s.points)}</td>
               <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
               <td style="color:var(--txt-dim)">${s.wins}·${s.draws}·${s.losses}</td>
             </tr>`).join('')}
