@@ -269,25 +269,25 @@ console.log('== Tie-breakers ==');
 console.log('== Roster changes mid-tournament ==');
 {
   const rng = mulberry32(31337);
-  const t = E.createTournament({ players: names(9), courts: 2, pointsPerMatch: 24 });
-  E.generateRound(t, rng);
+  const t = E.createTournament({ players: names(9), courts: 2, pointsPerMatch: 24, plannedRounds: 6 });
+  E.refillPlanned(t, rng);
+  ok(t.rounds.length === 6, 'prefilled to planned');
   for (let mi = 0; mi < 2; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, 0, mi, a, b); }
-  E.generateRound(t, rng); // unscored round 2
   const p10 = E.addPlayer(t, 'P10', rng);
-  ok(t.rounds.length === 2, 'unscored trailing round regenerated, count stable');
+  ok(t.rounds.length === 6, 'refilled to planned after add');
   const r2 = t.rounds[1];
   const inRound = new Set(r2.resting.concat(r2.matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(inRound.has(p10.id), 'new player included in regenerated round');
-  ok(inRound.size === 10, 'regenerated round covers 10 players');
+  ok(inRound.has(p10.id), 'new player included in redrawn round 2');
+  ok(inRound.size === 10, 'redrawn round covers 10 players');
   checkRoundStructure(t, r2, 'after addPlayer');
 
-  // remove a player -> excluded from future rounds, kept in standings
+  // remove a player -> excluded from redrawn future rounds, kept in standings
   for (let mi = 0; mi < r2.matches.length; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, 1, mi, a, b); }
   const victim = E.activePlayers(t)[0];
   E.removePlayer(t, victim.id, rng);
-  const r3 = E.generateRound(t, rng);
+  const r3 = t.rounds[2];
   const inR3 = new Set(r3.resting.concat(r3.matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(!inR3.has(victim.id), 'removed player not in new round');
+  ok(!inR3.has(victim.id), 'removed player not in redrawn round 3');
   ok(E.standings(t).some(s => s.player.id === victim.id), 'removed player still in standings');
   checkRoundStructure(t, r3, 'after removePlayer');
 
@@ -296,56 +296,137 @@ console.log('== Roster changes mid-tournament ==');
   assert.throws(() => E.removePlayer(t4, t4.players[0].id, rng), /at least 4/);
 }
 
+// ------------------------------------------- skill change redraws provisionals
+console.log('== Skill change redraws provisional rounds ==');
+{
+  const rng = mulberry32(444);
+  const t = E.createTournament({
+    players: names(10).map(n => ({ name: n, skill: 2 })),
+    courts: 2, useSkills: true, plannedRounds: 8,
+  });
+  E.refillPlanned(t, rng);
+  for (let mi = 0; mi < 2; mi++) E.setScore(t, 0, mi, 14, 10);
+  const playedSnap = JSON.stringify(t.rounds[0]);
+  const futureSnap = JSON.stringify(t.rounds.slice(1));
+  E.setSkill(t, t.players[0].id, 3, rng);
+  ok(t.rounds.length === 8, 'skill change keeps planned count');
+  ok(JSON.stringify(t.rounds[0]) === playedSnap, 'played round untouched by skill change');
+  ok(JSON.stringify(t.rounds.slice(1)) !== futureSnap, 'future rounds redrawn on skill change');
+  for (let i = 1; i < 8; i++) checkRoundStructure(t, t.rounds[i], `post-skill r${i + 1}`);
+}
+
 // --------------------------------------------------------------- regeneration
-console.log('== Regenerate round ==');
+console.log('== Regenerate rounds (americano: from idx onward) ==');
 {
   const rng = mulberry32(99);
-  const t = E.createTournament({ players: names(10), courts: 2 });
-  E.generateRound(t, rng);
-  const before = JSON.stringify(t.rounds[0]);
+  const t = E.createTournament({ players: names(10), courts: 2, plannedRounds: 8 });
+  E.refillPlanned(t, rng);
   E.regenerateRound(t, 0, rng);
-  ok(t.rounds.length === 1, 'regenerate keeps round count');
-  checkRoundStructure(t, t.rounds[0], 'regenerated');
+  ok(t.rounds.length === 8, 'full redraw keeps planned count');
+  for (let i = 0; i < 8; i++) checkRoundStructure(t, t.rounds[i], `full redraw r${i + 1}`);
   E.setScore(t, 0, 0, 12, 12);
   assert.throws(() => E.regenerateRound(t, 0, rng), /scores/);
-  E.generateRound(t, rng);
-  assert.throws(() => E.regenerateRound(t, 0, rng), /last round/);
-  void before;
+  // redraw from round 3 onward: rounds 1-2 (incl. the score) untouched
+  const r1snap = JSON.stringify(t.rounds[0]);
+  const r2snap = JSON.stringify(t.rounds[1]);
+  E.regenerateRound(t, 2, rng);
+  ok(t.rounds.length === 8, 'partial redraw refills to planned');
+  ok(JSON.stringify(t.rounds[0]) === r1snap && JSON.stringify(t.rounds[1]) === r2snap,
+    'earlier rounds untouched by partial redraw');
+  ok(t.rounds[0].matches[0].scoreA === 12, 'score preserved through redraw');
+
+  // mexicano: regenerate stays single-round
+  const tm = E.createTournament({ players: names(8), courts: 2, format: 'mexicano' });
+  E.generateRound(tm, rng);
+  E.regenerateRound(tm, 0, rng);
+  ok(tm.rounds.length === 1, 'mexicano regenerate keeps single pending round');
+}
+
+// ------------------------------------------------------- future-score locking
+console.log('== Future rounds cannot be scored ==');
+{
+  const rng = mulberry32(123);
+  const t = E.createTournament({ players: names(8), courts: 2, plannedRounds: 4 });
+  E.refillPlanned(t, rng);
+  assert.throws(() => E.setScore(t, 2, 0, 14, 10), /Finish round 1 first/);
+  E.setScore(t, 0, 0, 14, 10);
+  assert.throws(() => E.setScore(t, 1, 0, 14, 10), /Finish round 1 first/); // r1 only half done
+  E.setScore(t, 0, 1, 10, 14);
+  E.setScore(t, 1, 0, 14, 10); // now allowed
+  E.setScore(t, 1, 1, 12, 12);
+  // corrections to completed earlier rounds stay allowed
+  E.setScore(t, 0, 0, 20, 4);
+  ok(t.rounds[0].matches[0].scoreA === 20, 'editing a completed past round still works');
 }
 
 // -------------------------------------------------- rename / rejoin / courts
-console.log('== Rename, rejoin, change courts ==');
+console.log('== Rename, rejoin, change courts (with provisional refill) ==');
 {
   const rng = mulberry32(2024);
-  const t = E.createTournament({ players: names(10), courts: 2, pointsPerMatch: 24 });
-  E.generateRound(t, rng);
-  // rename
+  const t = E.createTournament({ players: names(10), courts: 2, pointsPerMatch: 24, plannedRounds: 8 });
+  E.refillPlanned(t, rng);
+  ok(t.rounds.length === 8, 'americano pre-draws all planned rounds');
+  for (let i = 0; i < 8; i++) checkRoundStructure(t, t.rounds[i], `prefill r${i + 1}`);
+
+  // rename (never redraws)
+  const snapshot = JSON.stringify(t.rounds);
   E.renamePlayer(t, t.players[0].id, 'Zlatan');
   ok(t.players[0].name === 'Zlatan', 'rename applied');
-  ok(E.standings(t).some(s => s.player.name === 'Zlatan'), 'rename visible in standings');
+  ok(JSON.stringify(t.rounds) === snapshot, 'rename does not redraw rounds');
   assert.throws(() => E.renamePlayer(t, t.players[1].id, 'zlatan'), /already in use/);
   assert.throws(() => E.renamePlayer(t, t.players[1].id, '  '), /Name required/);
 
-  // rejoin: remove someone, score the round, then bring them back
+  // future rounds are locked for scoring
+  assert.throws(() => E.setScore(t, 1, 0, 14, 10), /Finish round 1 first/);
   for (let mi = 0; mi < 2; mi++) E.setScore(t, 0, mi, 14, 10);
+  E.setScore(t, 1, 0, 14, 10); // round 1 complete -> round 2 scorable now
+  E.clearScore(t, 1, 0);
+
+  // remove someone -> unplayed rounds (2..8) redraw immediately without them
   const out = E.activePlayers(t)[3];
   E.removePlayer(t, out.id, rng);
-  E.generateRound(t, rng); // round 2 without them (unscored)
-  let inR2 = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(!inR2.has(out.id), 'removed player absent from round 2');
+  ok(t.rounds.length === 8, 'still filled to planned after removal');
+  for (let i = 1; i < 8; i++) {
+    const ids = new Set(t.rounds[i].resting.concat(t.rounds[i].matches.flatMap(m => m.teamA.concat(m.teamB))));
+    ok(!ids.has(out.id), `removed player absent from redrawn round ${i + 1}`);
+    checkRoundStructure(t, t.rounds[i], `after remove r${i + 1}`);
+  }
+  // rejoin -> future rounds redraw to include them again
   E.reactivatePlayer(t, out.id, rng);
-  ok(t.rounds.length === 2, 'rejoin regenerated trailing unscored round');
-  inR2 = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(inR2.has(out.id), 'rejoined player back in the draw');
-  checkRoundStructure(t, t.rounds[1], 'after rejoin');
+  ok(t.rounds.length === 8, 'still filled to planned after rejoin');
+  const inR2 = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(inR2.has(out.id), 'rejoined player back in the next draw');
 
-  // change courts mid-tournament: 2 -> 1 regenerates unscored round with 1 match
+  // change courts mid-tournament: future rounds use 1 court, played round untouched
   E.setCourts(t, 1, rng);
+  ok(t.rounds.length === 8, 'filled to planned after court change');
   ok(t.rounds[1].matches.length === 1 && t.rounds[1].resting.length === 6, 'court change applied to next draw');
-  checkRoundStructure(t, t.rounds[1], 'after setCourts');
-  assert.throws(() => E.setCourts(t, 0, rng), /1-6/);
-  // scored rounds are never touched
   ok(t.rounds[0].matches.length === 2, 'past round untouched by court change');
+  assert.throws(() => E.setCourts(t, 0, rng), /1-6/);
+
+  // shrinking/growing the plan trims/refills unplayed rounds only
+  E.setPlannedRounds(t, 5, rng);
+  ok(t.rounds.length === 5 && t.config.plannedRounds === 5, 'plan shrunk to 5');
+  E.setPlannedRounds(t, 9, rng);
+  ok(t.rounds.length === 9 && t.config.plannedRounds === 9, 'plan grown to 9');
+  ok(E.setPlannedRounds(t, 0, rng) >= 1, 'plan never below played rounds');
+}
+
+// ------------------------------------------------ mexicano stays lazy
+console.log('== Mexicano roster change keeps lazy draws ==');
+{
+  const rng = mulberry32(606);
+  const t = E.createTournament({ players: names(9), courts: 2, format: 'mexicano', pointsPerMatch: 24 });
+  E.generateRound(t, rng);
+  E.refillPlanned(t, rng);
+  ok(t.rounds.length === 1, 'refillPlanned is a no-op for mexicano');
+  for (let mi = 0; mi < 2; mi++) E.setScore(t, 0, mi, 14, 10);
+  E.generateRound(t, rng); // pending round 2
+  const p10 = E.addPlayer(t, 'P10', rng);
+  ok(t.rounds.length === 2, 'mexicano: pending round regenerated, no prefill');
+  const ids = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(ids.has(p10.id), 'mexicano: new player in regenerated round');
+  checkRoundStructure(t, t.rounds[1], 'mexicano after addPlayer');
 }
 
 // ---------------------------------------------------------- rest compensation

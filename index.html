@@ -204,6 +204,13 @@ input, select { font-family: inherit; }
 .round-dots i.part { background: var(--amber); border-color: var(--amber); }
 .round-dots i.cur { outline: 2px solid var(--steel-hi); outline-offset: 1px; }
 .round-dots i.future { opacity: .4; }
+.court-card.locked { opacity: .6; }
+.prov-chip {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 7px;
+  font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--amber); background: rgba(245,185,69,.08); border: 1px solid rgba(245,185,69,.35);
+  border-radius: 999px; padding: 4px 12px;
+}
 
 /* ============ match card = mini court ============ */
 .court-card {
@@ -405,6 +412,7 @@ body.sheet-lock { position: fixed; left: 0; right: 0; overflow: hidden; }
   #app { border-left: 1px solid var(--line); border-right: 1px solid var(--line); max-width: 760px; }
   .content, .setup-body { padding-left: 28px; padding-right: 28px; }
   .setup-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px; align-items: start; }
+  .setup-format { grid-column: 1 / -1; }
   .setup-footer { grid-column: 1 / -1; max-width: 520px; width: 100%; margin: 0 auto; }
 }
 
@@ -790,17 +798,59 @@ const Engine = (() => {
     return round;
   }
 
-  /** Re-draw a round. Only allowed on the last round and only when unscored. */
+  /** Americano: draw every planned round upfront (rounds beyond the current are provisional). */
+  function refillPlanned(t, rng) {
+    if (t.config.format !== 'americano') return;
+    while (t.rounds.length < t.config.plannedRounds && activePlayers(t).length >= 4) {
+      generateRound(t, rng);
+    }
+  }
+
+  /**
+   * Drop every trailing round without scores and redraw: Americano refills to the
+   * planned count, Mexicano regenerates the single pending round it had. Called
+   * after any change that affects draws (roster, courts, skills). Played rounds
+   * are never touched. No-op before the tournament has started.
+   */
+  function redrawFuture(t, rng) {
+    const before = t.rounds.length;
+    let dropped = 0;
+    while (t.rounds.length && !anyScores(t.rounds[t.rounds.length - 1])) { t.rounds.pop(); dropped++; }
+    if (!before || activePlayers(t).length < 4) return;
+    if (t.config.format === 'americano') refillPlanned(t, rng);
+    else if (dropped) generateRound(t, rng);
+  }
+
+  /** Change the planned round count; trims/refills unplayed rounds (Americano). */
+  function setPlannedRounds(t, n, rng) {
+    n = Math.max(1, Math.floor(Number(n) || 0));
+    while (t.rounds.length > n && !anyScores(t.rounds[t.rounds.length - 1])) t.rounds.pop();
+    n = Math.max(n, t.rounds.length); // can never plan below what's already played
+    t.config.plannedRounds = n;
+    refillPlanned(t, rng);
+    return n;
+  }
+
+  /** Re-draw from round `idx` onward. Allowed only when those rounds have no scores. */
   function regenerateRound(t, idx, rng) {
-    if (idx !== t.rounds.length - 1) throw new Error('Can only regenerate the last round');
-    if (anyScores(t.rounds[idx])) throw new Error('Cannot regenerate a round with scores');
-    t.rounds.pop();
-    return generateRound(t, rng);
+    if (idx < 0 || idx >= t.rounds.length) throw new Error('No such round');
+    for (let i = idx; i < t.rounds.length; i++) {
+      if (anyScores(t.rounds[i])) throw new Error('Cannot re-draw rounds that have scores');
+    }
+    t.rounds.length = idx;
+    if (t.config.format === 'americano') refillPlanned(t, rng);
+    else generateRound(t, rng);
+    return t.rounds[idx];
   }
 
   // ---------- scoring ----------
 
   function setScore(t, roundIdx, matchIdx, scoreA, scoreB) {
+    // only the current round (and corrections to finished ones) can be scored —
+    // future provisional rounds may still be redrawn, so their scores are locked
+    for (let i = 0; i < roundIdx; i++) {
+      if (!roundComplete(t, i)) throw new Error('Finish round ' + (i + 1) + ' first');
+    }
     const m = t.rounds[roundIdx].matches[matchIdx];
     const a = Number(scoreA), b = Number(scoreB);
     if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0) {
@@ -877,16 +927,7 @@ const Engine = (() => {
   }
 
   // ---------- roster changes ----------
-
-  function dropUnscoredTrailingRound(t, pid) {
-    const last = t.rounds[t.rounds.length - 1];
-    if (!last || anyScores(last)) return false;
-    const involved = pid === undefined ||
-      last.resting.includes(pid) ||
-      last.matches.some(m => m.teamA.includes(pid) || m.teamB.includes(pid));
-    if (involved) { t.rounds.pop(); return true; }
-    return false;
-  }
+  // every change that affects fairness or balance redraws the unplayed rounds
 
   /** Add a player mid-tournament. Returns the new player. */
   function addPlayer(t, name, rng, skill) {
@@ -894,14 +935,15 @@ const Engine = (() => {
     if (!name) throw new Error('Name required');
     const p = { id: uid(), name, active: true, skill: clampSkill(skill) };
     t.players.push(p);
-    if (dropUnscoredTrailingRound(t)) generateRound(t, rng);
+    redrawFuture(t, rng);
     return p;
   }
 
-  function setSkill(t, pid, skill) {
+  function setSkill(t, pid, skill, rng) {
     const p = t.players.find(x => x.id === pid);
     if (!p) throw new Error('No such player');
     p.skill = clampSkill(skill);
+    if (t.config.format === 'americano' && t.config.useSkills) redrawFuture(t, rng);
   }
 
   /** Deactivate a player: kept in standings, excluded from future rounds. */
@@ -912,7 +954,7 @@ const Engine = (() => {
       throw new Error('Need at least 4 active players');
     }
     p.active = false;
-    if (dropUnscoredTrailingRound(t, pid)) generateRound(t, rng);
+    redrawFuture(t, rng);
   }
 
   /** Bring a removed player back: rejoins from the next draw. */
@@ -920,7 +962,7 @@ const Engine = (() => {
     const p = t.players.find(x => x.id === pid);
     if (!p) throw new Error('No such player');
     p.active = true;
-    if (dropUnscoredTrailingRound(t)) generateRound(t, rng);
+    redrawFuture(t, rng);
   }
 
   function renamePlayer(t, pid, name) {
@@ -934,13 +976,13 @@ const Engine = (() => {
     p.name = name;
   }
 
-  /** Change court count mid-tournament; applies from the next draw. */
+  /** Change court count mid-tournament; unplayed rounds are redrawn. */
   function setCourts(t, n, rng) {
     n = Math.floor(Number(n));
     if (!(n >= 1 && n <= 6)) throw new Error('Courts must be 1-6');
     if (n === t.config.courts) return;
     t.config.courts = n;
-    if (dropUnscoredTrailingRound(t)) generateRound(t, rng);
+    redrawFuture(t, rng);
   }
 
   function playerName(t, pid) {
@@ -949,7 +991,8 @@ const Engine = (() => {
   }
 
   return {
-    createTournament, generateRound, regenerateRound, setScore, clearScore,
+    createTournament, generateRound, regenerateRound, refillPlanned, redrawFuture,
+    setPlannedRounds, setScore, clearScore,
     roundComplete, standings, addPlayer, removePlayer, reactivatePlayer,
     renamePlayer, setCourts, setSkill, activePlayers,
     courtsUsed, historyCounts, playerName, anyScores,
@@ -1005,7 +1048,14 @@ const store = {
 
 let T = store.loadCurrent();           // current tournament (or null)
 let tab = 'rounds';                    // rounds | standings
-let viewRound = T ? T.rounds.length - 1 : 0;
+
+/** the round being played: first incomplete, or the last one when all are done */
+function currentRoundIdx(t) {
+  for (let i = 0; i < t.rounds.length; i++) if (!Engine.roundComplete(t, i)) return i;
+  return t.rounds.length - 1;
+}
+
+let viewRound = T ? currentRoundIdx(T) : 0;
 let scoreCtx = null;                   // {r, m, a, b} while score sheet open
 let setupState = null;                 // setup form state
 let timerInterval = null;
@@ -1014,7 +1064,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v15 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v16 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1109,19 +1159,31 @@ function renderSetup() {
     </div>
     <div class="setup-body">
 
+      <div class="setup-format">
+      <div class="field-label">Format</div>
+      <div class="seg" id="seg-format">
+        <button data-v="americano" class="${s.format === 'americano' ? 'on lime' : ''}">Americano</button>
+        <button data-v="mexicano" class="${s.format === 'mexicano' ? 'on lime' : ''}">Mexicano</button>
+      </div>
+      <div class="setup-note">${s.format === 'americano'
+        ? '<b>Americano:</b> new partner every round — fair mix, everyone plays with everyone. The full schedule is drawn upfront.'
+        : '<b>Mexicano:</b> round 1 random, then each draw follows the live standings (1st+4th vs 2nd+3rd per court) for even matches — so rounds appear one at a time.'}</div>
+      </div>
+
       <div class="setup-players">
       <div class="field-label">Players <span class="hint">${filled} entered ${filled >= 4 ? '' : '(need 4+)'}</span></div>
+      ${s.format === 'americano' ? `
       <div class="seg" id="seg-skillmode" style="margin-bottom:10px">
         <button data-v="0" class="${!s.useSkills ? 'on' : ''}">No skill levels</button>
         <button data-v="1" class="${s.useSkills ? 'on' : ''}">Skill levels</button>
       </div>
-      ${s.useSkills ? `<div class="setup-note" style="margin:0 0 10px">Tap a player’s badge to cycle — <b style="color:var(--lime)">+</b> stronger · <b>•</b> middle · <b style="color:var(--amber)">−</b> weaker, relative to your group. Draws then avoid lopsided matches (the strongest two never gang up on the weakest two).</div>` : ''}
+      ${s.useSkills ? `<div class="setup-note" style="margin:0 0 10px">Tap a player’s badge to cycle — <b style="color:var(--lime)">+</b> stronger · <b>•</b> middle · <b style="color:var(--amber)">−</b> weaker, relative to your group. Draws then avoid lopsided matches (the strongest two never gang up on the weakest two).</div>` : ''}` : ''}
       <div id="player-list">
         ${s.players.map((n, i) => `
           <div class="player-row">
             <span class="pnum">${i + 1}</span>
             <input data-pi="${i}" value="${esc(n)}" placeholder="Player name" autocomplete="off" enterkeyhint="next">
-            ${s.useSkills ? `<button class="skill-badge sk${s.skills[i]}" data-sk="${i}">${SKILL_GLYPH[s.skills[i]]}</button>` : ''}
+            ${s.format === 'americano' && s.useSkills ? `<button class="skill-badge sk${s.skills[i]}" data-sk="${i}">${SKILL_GLYPH[s.skills[i]]}</button>` : ''}
             <button class="del" data-del="${i}" aria-label="Remove">✕</button>
           </div>`).join('')}
       </div>
@@ -1135,15 +1197,6 @@ function renderSetup() {
         <div class="stepper-val">${s.courts}</div>
         <button data-step="1">+</button>
       </div>
-
-      <div class="field-label">Format</div>
-      <div class="seg" id="seg-format">
-        <button data-v="americano" class="${s.format === 'americano' ? 'on lime' : ''}">Americano</button>
-        <button data-v="mexicano" class="${s.format === 'mexicano' ? 'on lime' : ''}">Mexicano</button>
-      </div>
-      <div class="setup-note">${s.format === 'americano'
-        ? '<b>Americano:</b> new partner every round — fair mix, everyone plays with everyone.'
-        : '<b>Mexicano:</b> round 1 random, then draws follow the standings (1st+4th vs 2nd+3rd per court) for even matches.'}</div>
 
       <div class="field-label">Points per match</div>
       <div class="preset-row" id="points-presets">
@@ -1229,7 +1282,8 @@ function renderSetup() {
     renderSetup();
   }));
   $('#add-player-row').addEventListener('click', () => { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); });
-  $('#seg-skillmode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+  const skm = $('#seg-skillmode');
+  if (skm) skm.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     s.useSkills = b.dataset.v === '1';
     renderSetup();
   }));
@@ -1294,8 +1348,8 @@ function startTournament() {
   if (new Set(lower).size !== lower.length) { toast('Player names must be unique', true); return; }
   mutate(() => {
     T = Engine.createTournament({
-      players: s.useSkills ? roster : names,
-      useSkills: s.useSkills,
+      players: s.format === 'americano' && s.useSkills ? roster : names,
+      useSkills: s.format === 'americano' && s.useSkills,
       restMode: s.restMode,
       courts: s.courts,
       format: s.format,
@@ -1307,7 +1361,8 @@ function startTournament() {
       createdAt: Date.now(),
     });
     T.config.durationMin = s.durationMin;
-    Engine.generateRound(T);
+    if (T.config.format === 'americano') Engine.refillPlanned(T); // full schedule upfront, future rounds provisional
+    else Engine.generateRound(T);                                  // mexicano: each round needs the previous scores
     store.saveLastPlayers(names, Object.fromEntries(roster.map(r => [r.name.toLowerCase(), r.skill])), s.useSkills);
     tab = 'rounds';
     viewRound = 0;
@@ -1405,6 +1460,14 @@ function renderRoundsTab() {
   const complete = Engine.roundComplete(T, viewRound);
   const planned = T.config.plannedRounds;
   const allPlannedDone = T.rounds.length >= planned && T.rounds.every((_, i) => Engine.roundComplete(T, i));
+  const curIdx = currentRoundIdx(T);
+  const isAmericano = T.config.format === 'americano';
+  // future Americano rounds exist but may be redrawn if players/courts/skills change
+  const provisional = isAmericano && viewRound > curIdx && !Engine.anyScores(r);
+  // re-draw allowed for any stretch of score-free rounds at the tail
+  const canRegen = !Engine.anyScores(r) &&
+    T.rounds.slice(viewRound + 1).every(x => !Engine.anyScores(x)) &&
+    (isAmericano || isLast);
 
   const dots = [];
   const total = Math.max(planned, T.rounds.length);
@@ -1421,16 +1484,18 @@ function renderRoundsTab() {
       <div class="round-title">
         <h2>Round ${viewRound + 1}</h2>
         <div class="round-dots">${dots.join('')}</div>
+        ${provisional ? '<span class="prov-chip" title="May change if players, courts or skills change before it is played">⚠ provisional draw</span>' : ''}
       </div>
       <button class="nav" id="rnav-next" ${isLast ? 'disabled' : ''}>›</button>
     </div>
 
     ${r.matches.map((m, mi) => {
       const scored = m.scoreA !== null;
+      const locked = viewRound > curIdx;
       const aWin = scored && m.scoreA > m.scoreB, bWin = scored && m.scoreB > m.scoreA;
       return `
-      <div class="court-card ${scored ? 'scored' : ''}" data-match="${mi}">
-        <div class="court-head"><span class="cname">Court ${mi + 1}</span><span class="cname">${scored ? 'tap to edit' : 'tap to score'}</span></div>
+      <div class="court-card ${scored ? 'scored' : ''} ${locked ? 'locked' : ''}" data-match="${mi}">
+        <div class="court-head"><span class="cname">Court ${mi + 1}</span><span class="cname">${scored ? 'tap to edit' : locked ? `🔒 plays after round ${curIdx + 1}` : 'tap to score'}</span></div>
         <div class="court-body">
           <div class="team">
             <span class="tp">${pname(m.teamA[0])}</span>
@@ -1459,29 +1524,38 @@ function renderRoundsTab() {
     </div>`;
     })() : ''}
 
-    ${T.config.roundTimerMin ? roundTimerHTML(r) : ''}
+    ${provisional ? '<div class="setup-note" style="margin-top:12px">This draw is provisional — it may be redrawn if players, courts or skill badges change before it’s played. Scores already entered are never touched.</div>' : ''}
+
+    ${T.config.roundTimerMin && viewRound === curIdx ? roundTimerHTML(r) : ''}
 
     ${allPlannedDone ? `
     <div class="banner"><b>All ${T.rounds.length} rounds played!</b> Finish the tournament to crown the winner — or squeeze in another round.</div>` : ''}
 
     <div class="round-actions">
-      ${isLast && complete && !allPlannedDone ? `<button class="btn btn-primary btn-block" id="next-round-btn" style="font-size:1.2rem;padding:16px">Draw round ${T.rounds.length + 1} →</button>` : ''}
+      ${!isAmericano && isLast && complete && !allPlannedDone ? `<button class="btn btn-primary btn-block" id="next-round-btn" style="font-size:1.2rem;padding:16px">Draw round ${T.rounds.length + 1} →</button>` : ''}
       ${allPlannedDone ? `
         <button class="btn btn-primary btn-block" id="finish-btn" style="font-size:1.2rem;padding:16px">🏆 Finish &amp; crown winner</button>
         <button class="btn btn-ghost btn-block" id="extra-round-btn">+ One more round</button>` : ''}
-      ${isLast && !Engine.anyScores(r) ? '<button class="btn btn-ghost btn-block" id="regen-btn">⟲ Re-draw this round</button>' : ''}
+      ${canRegen ? `<button class="btn btn-ghost btn-block" id="regen-btn">⟲ Re-draw ${isAmericano && viewRound < T.rounds.length - 1 ? 'this & later rounds' : 'this round'}</button>` : ''}
       <button class="btn btn-ghost btn-block" id="share-draws">📋 Copy round draws</button>
     </div>`;
 
   $('#rnav-prev').addEventListener('click', () => { viewRound--; render(); });
   $('#rnav-next').addEventListener('click', () => { viewRound++; render(); });
-  c.querySelectorAll('[data-match]').forEach(el => el.addEventListener('click', () => openScoreSheet(viewRound, +el.dataset.match)));
+  c.querySelectorAll('[data-match]').forEach(el => el.addEventListener('click', () => {
+    if (viewRound > curIdx) { toast(`Round ${viewRound + 1} is locked — finish round ${curIdx + 1} first`); return; }
+    openScoreSheet(viewRound, +el.dataset.match);
+  }));
   const nb = $('#next-round-btn');
   if (nb) nb.addEventListener('click', () => busy(nb, 'Drawing…', () =>
     mutate(() => { Engine.generateRound(T); viewRound = T.rounds.length - 1; })));
   const eb = $('#extra-round-btn');
   if (eb) eb.addEventListener('click', () => busy(eb, 'Drawing…', () =>
-    mutate(() => { T.config.plannedRounds = T.rounds.length + 1; Engine.generateRound(T); viewRound = T.rounds.length - 1; })));
+    mutate(() => {
+      if (T.config.format === 'americano') Engine.setPlannedRounds(T, T.rounds.length + 1);
+      else { T.config.plannedRounds = T.rounds.length + 1; Engine.generateRound(T); }
+      viewRound = T.rounds.length - 1;
+    })));
   const rb = $('#regen-btn');
   if (rb) rb.addEventListener('click', () => busy(rb, 'Re-drawing…', () =>
     mutate(() => { Engine.regenerateRound(T, viewRound); })));
@@ -1868,7 +1942,7 @@ function openPlayersSheet(editPid) {
           ${p.id === editPid
             ? `<button class="del" id="pl-save" style="color:var(--lime)">✓</button>`
             : p.active
-              ? `${T.config.useSkills ? `<button class="skill-badge sk${p.skill || 2}" data-skp="${p.id}">${SKILL_GLYPH[p.skill || 2]}</button>` : ''}<button class="del" data-ed="${p.id}">✎</button><button class="del" data-rm="${p.id}">✕</button>`
+              ? `${T.config.format === 'americano' && T.config.useSkills ? `<button class="skill-badge sk${p.skill || 2}" data-skp="${p.id}">${SKILL_GLYPH[p.skill || 2]}</button>` : ''}<button class="del" data-ed="${p.id}">✎</button><button class="del" data-rm="${p.id}">✕</button>`
               : `<button class="del" data-rj="${p.id}" style="color:var(--lime);font-size:.9rem;width:auto;padding:0 12px">↩ rejoin</button>`}
         </div>`).join('')}
     </div>
@@ -1937,12 +2011,13 @@ function openSettingsSheet() {
       <button data-v="points" class="${c.ranking === 'points' ? 'on' : ''}">Total points</button>
       <button data-v="wins" class="${c.ranking === 'wins' ? 'on' : ''}">Wins first</button>
     </div>
+    ${c.format === 'americano' ? `
     <div class="field-label">Balanced draws (skill levels)</div>
     <div class="seg" id="set-skillmode">
       <button data-v="0" class="${!c.useSkills ? 'on' : ''}">Off</button>
       <button data-v="1" class="${c.useSkills ? 'on' : ''}">On</button>
     </div>
-    <div class="setup-note">Set each player's badge in Menu → Players (+ stronger · • middle · − weaker). Americano draws then avoid obviously lopsided matches. Mexicano ignores this — its standings already balance courts.</div>
+    <div class="setup-note">Set each player's badge in Menu → Players (+ stronger · • middle · − weaker). Unplayed rounds are redrawn instantly to avoid lopsided matches.</div>` : ''}
     <div class="field-label">Sit-out compensation</div>
     <div class="seg" id="set-rest">
       <button data-m="none" class="${restMode === 'none' ? 'on' : ''}">None</button>
@@ -1960,15 +2035,23 @@ function openSettingsSheet() {
     openSettingsSheet();
   }));
   ov.querySelector('#set-rounds').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    mutate(() => { T.config.plannedRounds = Math.max(1, T.rounds.length, T.config.plannedRounds + (+b.dataset.d)); });
+    mutate(() => {
+      const target = T.config.plannedRounds + (+b.dataset.d);
+      if (T.config.format === 'americano') Engine.setPlannedRounds(T, target);
+      else T.config.plannedRounds = Math.max(1, T.rounds.length, target);
+    });
     openSettingsSheet();
   }));
   ov.querySelector('#set-ranking').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     mutate(() => { T.config.ranking = b.dataset.v; });
     openSettingsSheet();
   }));
-  ov.querySelector('#set-skillmode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    mutate(() => { T.config.useSkills = b.dataset.v === '1'; });
+  const sm = ov.querySelector('#set-skillmode');
+  if (sm) sm.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    mutate(() => {
+      T.config.useSkills = b.dataset.v === '1';
+      Engine.redrawFuture(T); // provisional rounds recompute immediately
+    });
     openSettingsSheet();
   }));
   ov.querySelector('#set-rest').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
@@ -1990,6 +2073,7 @@ function openHelpSheet() {
       <p><b>Mexicano</b> — round 1 is random; from round 2 the standings decide the draw: on each court, 1st+4th play 2nd+3rd of that group, so matches stay close.</p>
       <p><b>Serving</b> — one player serves <b>4 points in a row</b>, then the serve crosses to the other team. Partners take turns: each time the serve comes back to your team, the <em>other</em> partner serves. So a 24-point match goes: you serve 4 → opponent A serves 4 → your partner serves 4 → opponent B serves 4 → you again… until all points are played. Within your 4 serves, alternate service box (right, left, right, left) like normal padel. Who serves first? Spin a racket — it doesn't matter for the points. (If your group prefers 2-point serve turns, that's fine too — the app doesn't track serves.)</p>
       <p><b>Fair draws</b> — nobody sits out twice in a row, everyone's game count stays within ±1, and partners repeat only when mathematically unavoidable. Sit-out counts are shown next to resting players and in the standings.</p>
+      <p><b>The schedule</b> — Americano draws every planned round upfront so you can see the whole evening. Rounds beyond the one being played are marked <b>provisional</b>: they redraw instantly if players, courts or skill badges change, and they can't be scored until it's their turn. Played scores are never touched. Mexicano draws each round only after the previous finishes — its pairings depend on the live standings.</p>
       <p><b>Sitting out</b> — earns nothing by default. Two compensation options (at setup, in Settings, or right on the standings — switch anytime, standings recompute instantly): <b>fixed</b> +half the match points per rest (neutral — resting neither costs nor pays), or <b>their avg</b> — each rest credits that player's own points-per-game, like ranking by average, so strong players keep their pace while resting.</p>
       <p><b>Scores</b> — tap any court card to enter or fix a score, in any round, anytime. Standings always recompute from the raw scores.</p>
       <p><b>Players</b> — Menu → Players to add, rename, remove or rejoin someone mid-session. Draws adapt from the next round; results already played are kept.</p>
@@ -2047,7 +2131,7 @@ function openTvMode() {
     tv.addEventListener('click', closeTvMode);
   }
   const st = Engine.standings(T);
-  const ri = T.rounds.length - 1;
+  const ri = currentRoundIdx(T);
   const r = T.rounds[ri];
   tv.innerHTML = `
     <div class="tv-head">
@@ -2118,8 +2202,9 @@ function copyText(text, okMsg) {
 
 function copyRoundDraws() {
   const r = T.rounds[viewRound];
+  const prov = T.config.format === 'americano' && viewRound > currentRoundIdx(T) && !Engine.anyScores(r);
   const lines = [
-    `🎾 ${T.config.name} — Round ${viewRound + 1}`,
+    `🎾 ${T.config.name} — Round ${viewRound + 1}${prov ? ' (provisional)' : ''}`,
     ...r.matches.map((m, i) =>
       `Court ${i + 1}: ${Engine.playerName(T, m.teamA[0])} + ${Engine.playerName(T, m.teamA[1])} vs ${Engine.playerName(T, m.teamB[0])} + ${Engine.playerName(T, m.teamB[1])}` +
       (m.scoreA !== null ? `  (${m.scoreA}–${m.scoreB})` : '')),
