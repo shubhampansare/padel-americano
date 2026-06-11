@@ -941,7 +941,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v8 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v9 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1533,18 +1533,17 @@ function renderScoreSheet() {
     </div>
     <div class="ovspace ovspace-b"></div>`;
 
-  const setAB = (na, nb) => { scoreCtx.a = na; scoreCtx.b = nb; renderScoreSheet(); };
   ov.querySelectorAll('.pmrow button').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
     const d = +btn.dataset.d, t = btn.dataset.t;
     if (combined) {
-      let na = t === 'a' ? a + d : a - d;
-      na = Math.max(0, Math.min(N, na));
-      setAB(na, N - na);
-    } else {
-      if (t === 'a') setAB(Math.max(0, a + d), b);
-      else setAB(a, Math.max(0, b + d));
-    }
+      // in combined mode the two sides are linked: +1 on one side is -1 on the other
+      const na = Math.max(0, Math.min(N, t === 'a' ? scoreCtx.a + d : scoreCtx.a - d));
+      scoreCtx.a = na;
+      scoreCtx.b = N - na;
+    } else if (t === 'a') scoreCtx.a = Math.max(0, scoreCtx.a + d);
+    else scoreCtx.b = Math.max(0, scoreCtx.b + d);
+    lightUpdate(); // in-place, same as the slider — no sheet re-render per press
   }));
   const bnA = $('#bn-a'), bnB = $('#bn-b');
   const slider = $('#score-slider');
