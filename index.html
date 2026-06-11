@@ -941,10 +941,13 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+const BUILD = 'v8 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+
 const footerHTML = () => `
   <div class="footer">
     <span>Made with <span class="heart">♥</span> for the Padel Potatoes</span>
     <a href="https://instagram.com/shoe.bum" target="_blank" rel="noopener">@shoe.bum</a>
+    <span style="font-size:.68rem;color:var(--txt-faint);letter-spacing:.05em">${BUILD}</span>
   </div>`;
 
 function toast(msg, isErr) {
