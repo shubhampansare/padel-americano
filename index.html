@@ -959,7 +959,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v11 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v12 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1851,7 +1851,7 @@ function openHelpSheet() {
     <div class="help-body">
       <p><b>Americano</b> — every round you get a new partner. A match is one long rally race: both teams' points add up to the match total (e.g. 14–10 in a 24-point match). You personally bank your team's score, win or lose. Highest individual total at the end wins.</p>
       <p><b>Mexicano</b> — round 1 is random; from round 2 the standings decide the draw: on each court, 1st+4th play 2nd+3rd of that group, so matches stay close.</p>
-      <p><b>Serving</b> — switch server every 4 points; teams swap serve after each block.</p>
+      <p><b>Serving</b> — one player serves <b>4 points in a row</b>, then the serve crosses to the other team. Partners take turns: each time the serve comes back to your team, the <em>other</em> partner serves. So a 24-point match goes: you serve 4 → opponent A serves 4 → your partner serves 4 → opponent B serves 4 → you again… until all points are played. Within your 4 serves, alternate service box (right, left, right, left) like normal padel. Who serves first? Spin a racket — it doesn't matter for the points. (If your group prefers 2-point serve turns, that's fine too — the app doesn't track serves.)</p>
       <p><b>Fair draws</b> — nobody sits out twice in a row, everyone's game count stays within ±1, and partners repeat only when mathematically unavoidable. Sit-out counts are shown next to resting players and in the standings.</p>
       <p><b>Sitting out</b> — earns nothing by default. If your group prefers, switch on compensation in Settings (+half the match points per rest — neutral, so resting is never an advantage).</p>
       <p><b>Scores</b> — tap any court card to enter or fix a score, in any round, anytime. Standings always recompute from the raw scores.</p>
