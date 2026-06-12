@@ -82,6 +82,14 @@ input, select { font-family: inherit; }
 }
 .seg button.on { background: linear-gradient(180deg, var(--steel-hi), var(--steel)); color: var(--txt); box-shadow: 0 1px 0 rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.08); }
 .seg button.on.lime { background: linear-gradient(180deg, var(--lime), var(--lime-deep)); color: #15200a; }
+.pill-select {
+  -webkit-appearance: none; appearance: none;
+  background: var(--bg1); border: 1px solid var(--line); border-radius: 999px;
+  color: var(--txt); font-weight: 600; font-size: .92rem;
+  padding: 10px 38px 10px 16px;
+  background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%2397a4b0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+  background-repeat: no-repeat; background-position: right 15px center;
+}
 
 .field-label {
   font-family: var(--disp); font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
@@ -881,8 +889,14 @@ const Engine = (() => {
     for (const p of t.players) {
       stats[p.id] = { player: p, points: 0, played: 0, wins: 0, draws: 0, losses: 0, pf: 0, pa: 0, diff: 0, rests: 0 };
     }
-    for (const r of t.rounds) {
-      for (const pid of r.resting) if (stats[pid]) stats[pid].rests++;
+    // Rests only count up to the round being played — Americano pre-draws the
+    // full schedule, and provisional future rests must not show up in the Rest
+    // column or earn compensation early. (Matches v15 lazily-drawn semantics.)
+    let reached = t.rounds.findIndex((_, i) => !roundComplete(t, i));
+    if (reached === -1) reached = t.rounds.length - 1;
+    for (let ri = 0; ri < t.rounds.length; ri++) {
+      const r = t.rounds[ri];
+      if (ri <= reached) for (const pid of r.resting) if (stats[pid]) stats[pid].rests++;
       for (const m of r.matches) {
         if (m.scoreA === null || m.scoreB === null) continue;
         const apply = (team, mine, theirs) => {
@@ -1064,7 +1078,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v16 · 11 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v17 · 12 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1667,11 +1681,11 @@ function renderStandingsTab() {
       const half = Math.floor(T.config.pointsPerMatch / 2);
       return `
     <div class="field-label" style="margin-top:16px">Sit-out points <span class="hint">recomputes live</span></div>
-    <div class="seg" id="stand-rest">
-      <button data-m="none" class="${mode === 'none' ? 'on' : ''}">None</button>
-      <button data-m="half" class="${mode === 'half' ? 'on' : ''}">+${half} fixed</button>
-      <button data-m="avg" class="${mode === 'avg' ? 'on' : ''}">Their avg</button>
-    </div>`;
+    <select class="pill-select" id="stand-rest">
+      <option value="none" ${mode === 'none' ? 'selected' : ''}>None</option>
+      <option value="half" ${mode === 'half' ? 'selected' : ''}>+${half} fixed</option>
+      <option value="avg" ${mode === 'avg' ? 'selected' : ''}>Their avg</option>
+    </select>`;
     })() : ''}
     <div class="setup-note" style="margin-top:14px">Ranked by ${T.config.ranking === 'wins' ? '<b>wins</b>, then points' : '<b>total points</b>'}, then point difference. ${(() => {
       const mode = T.config.restMode || (T.config.restPoints > 0 ? 'half' : 'none');
@@ -1681,9 +1695,9 @@ function renderStandingsTab() {
     })()} Tap a match card to enter scores.</div>`;
 
   const sr = c.querySelector('#stand-rest');
-  if (sr) sr.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    mutate(() => { T.config.restMode = b.dataset.m; T.config.restPoints = 0; });
-  }));
+  if (sr) sr.addEventListener('change', () => {
+    mutate(() => { T.config.restMode = sr.value; T.config.restPoints = 0; });
+  });
 }
 
 /* ---------------- score sheet ---------------- */

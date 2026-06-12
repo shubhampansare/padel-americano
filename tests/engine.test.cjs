@@ -49,11 +49,16 @@ function ok(cond, msg) {
 function names(n) { return Array.from({ length: n }, (_, i) => 'P' + (i + 1)); }
 
 // Independent recompute of standings from raw match data.
+// Rests only count up to the round being played (first incomplete round) —
+// Americano pre-draws the full schedule and provisional rests must not count.
 function recompute(t) {
   const s = {};
   for (const p of t.players) s[p.id] = { points: 0, played: 0, wins: 0, draws: 0, losses: 0, pf: 0, pa: 0, rests: 0 };
-  for (const r of t.rounds) {
-    for (const pid of r.resting) s[pid].rests++;
+  let reached = t.rounds.findIndex(r => r.matches.some(m => m.scoreA === null || m.scoreB === null));
+  if (reached === -1) reached = t.rounds.length - 1;
+  for (let ri = 0; ri < t.rounds.length; ri++) {
+    const r = t.rounds[ri];
+    if (ri <= reached) for (const pid of r.resting) s[pid].rests++;
     for (const m of r.matches) {
       if (m.scoreA === null) continue;
       for (const pid of m.teamA) {
@@ -476,6 +481,50 @@ console.log('== Rest compensation ==');
   // switching the mode off restores raw points
   ta.config.restMode = 'none';
   ok(E.standings(ta).every(s => s.points === s.pf), 'mode switch back to none = raw points');
+}
+
+// -------------------------------------------- provisional rests (v17 fix)
+// Americano pre-draws the full schedule (v16); rests in rounds beyond the one
+// being played must not show in standings or earn compensation early.
+console.log('== Provisional rests: future pre-drawn rounds neither count nor compensate ==');
+{
+  const rng = mulberry32(777);
+  const t = E.createTournament({
+    players: names(5), courts: 1, format: 'americano',
+    pointsPerMatch: 24, plannedRounds: 8, restMode: 'half',
+  });
+  E.refillPlanned(t, rng);
+  ok(t.rounds.length === 8, 'full schedule pre-drawn');
+  ok(t.rounds.reduce((a, r) => a + r.resting.length, 0) === 8, 'a rester in each pre-drawn round');
+
+  // before any scores: only round 1's rester counts (and is compensated)
+  let st = E.standings(t);
+  const r1rester = t.rounds[0].resting[0];
+  for (const s of st) {
+    const expect = s.player.id === r1rester ? 1 : 0;
+    ok(s.rests === expect, `pre-play: ${s.player.name} rests=${s.rests} expected ${expect}`);
+  }
+  ok(st.find(s => s.player.id === r1rester).points === 12, 'pre-play: current rester credited +12, future rests not');
+  ok(st.filter(s => s.player.id !== r1rester).every(s => s.points === 0), 'pre-play: everyone else at 0');
+
+  // complete round 1 → round 2 becomes current, its rester counts too
+  E.setScore(t, 0, 0, 14, 10);
+  st = E.standings(t);
+  const expected = {};
+  for (const pid of t.rounds[0].resting) expected[pid] = (expected[pid] || 0) + 1;
+  for (const pid of t.rounds[1].resting) expected[pid] = (expected[pid] || 0) + 1;
+  for (const s of st) {
+    ok(s.rests === (expected[s.player.id] || 0), `after r1: ${s.player.name} rests=${s.rests} expected ${expected[s.player.id] || 0}`);
+  }
+  ok(st.reduce((a, s) => a + s.rests, 0) === 2, 'after r1: exactly 2 rests counted (r1 taken + r2 current)');
+
+  // all rounds scored → every pre-drawn rest counts and is compensated
+  for (let r = 1; r < 8; r++) E.setScore(t, r, 0, 14, 10);
+  st = E.standings(t);
+  ok(st.reduce((a, s) => a + s.rests, 0) === 8, 'all played: all 8 rests counted');
+  for (const s of st) {
+    ok(s.points === s.pf + s.rests * 12, `all played: ${s.player.name} ${s.points} != ${s.pf + s.rests * 12}`);
+  }
 }
 
 // ------------------------------------------------------------------ perf 24p

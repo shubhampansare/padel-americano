@@ -46,6 +46,10 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   court); skill badges have no role in Mexicano.
 - Sit-out compensation modes: none | half (fixed N/2) | avg (player's own pts/game,
   recomputed live; legacy `restPoints > 0` config means 'half').
+- Rests count only up to the round being played (first incomplete) — provisional
+  future rounds' rests must never show in standings or earn compensation (v17 fix).
+  Draw fairness uses `historyCounts` (all drawn rounds, score-independent) — distinct
+  from `standings` rests by design.
 
 ## Parked / backlog
 
@@ -53,3 +57,16 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   (1+3 vs 2+4 etc.), manual round-1 seeding, fixed-partner mode, mixed-gender flag.
 - Other ideas from competitor research (docs/competitor-research.md): read-only spectator
   link, playoff/final from standings, PDF/CSV export, long-term cross-session rankings.
+- Open past tournaments: list the last ~5 saved tournaments (not just the most recent
+  name) and let the user open one to view its final standings, round-by-round scores, and
+  whatever else was stored. Read-only replay of a completed event.
+- Interesting score views: add visual takes on the results beyond the flat standings table.
+  Headline idea — a rank-timeline / bump chart showing how each player moved up or down
+  round by round (the "shocked at the final standings" moment is more fun as a story). Open
+  to other forms (momentum, biggest climbers, head-to-head).
+- First-to-N-games scoring mode: rounds played as mini-sets with normal 15/30/40 scoring
+  (golden point), first to N games (typically 4) wins; leaderboard counts games won, not
+  rally points. Best fit for Americano; coarse for Mexicano (0–4/round → heavy ties make
+  standings-based draws semi-arbitrary early, needs tiebreak handling). Free score entry
+  already approximates it today (enter 4–2 as the match score); a first-class mode adds a
+  setup preset + tiebreakers.
