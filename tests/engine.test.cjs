@@ -672,6 +672,75 @@ console.log('== Score views: progression + head-to-head ==');
   }
 }
 
+// -------------------------------------------------- games (first-to-N) mode
+console.log('== Games mode: first-to-N scoring ==');
+{
+  // strict setScore validation
+  const t = E.createTournament({ players: names(4), courts: 1, scoring: 'games', gamesTarget: 4, plannedRounds: 3 });
+  E.generateRound(t);
+  E.setScore(t, 0, 0, 4, 2); ok(t.rounds[0].matches[0].scoreA === 4, 'games: 4-2 accepted');
+  E.setScore(t, 0, 0, 0, 4); ok(t.rounds[0].matches[0].scoreB === 4, 'games: 0-4 accepted');
+  assert.throws(() => E.setScore(t, 0, 0, 4, 4), /First to 4/, 'games: 4-4 rejected (no winner)');
+  assert.throws(() => E.setScore(t, 0, 0, 3, 2), /First to 4/, 'games: 3-2 rejected (winner below N)');
+  assert.throws(() => E.setScore(t, 0, 0, 5, 4), /First to 4/, 'games: 5-4 rejected (winner above N)');
+  assert.throws(() => E.setScore(t, 0, 0, 4, 5), /First to 4/, 'games: 4-5 rejected');
+  ok(true, 'games: strict first-to-N validation enforced');
+
+  // standings: points == games won, match win == set win, no draws
+  function playGames(cfg, seed, rounds) {
+    const g = E.createTournament(Object.assign({ players: names(8), courts: 2, scoring: 'games', gamesTarget: 4 }, cfg));
+    const rng = mulberry32(seed);
+    if (g.config.format === 'mexicano') {
+      for (let r = 0; r < rounds; r++) {
+        const round = E.generateRound(g, rng);
+        checkRoundStructure(g, round, `${g.config.format}-games r${r + 1}`);
+        for (let mi = 0; mi < round.matches.length; mi++) {
+          const loser = Math.floor(rng() * 4), aWins = rng() < 0.5;
+          E.setScore(g, r, mi, aWins ? 4 : loser, aWins ? loser : 4);
+        }
+      }
+    } else {
+      E.refillPlanned(g, rng);
+      for (let r = 0; r < rounds; r++) for (let mi = 0; mi < g.rounds[r].matches.length; mi++) {
+        const loser = Math.floor(rng() * 4), aWins = rng() < 0.5;
+        E.setScore(g, r, mi, aWins ? 4 : loser, aWins ? loser : 4);
+      }
+    }
+    return g;
+  }
+
+  for (const fmt of ['americano', 'mexicano']) {
+    const g = playGames({ format: fmt, plannedRounds: 6 }, fmt === 'mexicano' ? 4242 : 55555, 6);
+    const st = E.standings(g), ref = recompute(g);
+    for (const row of st) {
+      ok(row.points === ref[row.player.id].points, `${fmt}-games: standings games == sum for ${row.player.name}`);
+      ok(row.wins === ref[row.player.id].wins && row.losses === ref[row.player.id].losses, `${fmt}-games: W/L for ${row.player.name}`);
+      ok(row.draws === 0, `${fmt}-games: no draws in strict first-to-N for ${row.player.name}`);
+    }
+    for (const rd of g.rounds) for (const m of rd.matches) {
+      if (m.scoreA === null) continue;
+      ok(Math.max(m.scoreA, m.scoreB) === 4 && Math.min(m.scoreA, m.scoreB) < 4, `${fmt}-games: every set is first-to-4`);
+    }
+  }
+
+  // 'half' compensation in games mode = gamesTarget/2 per rest
+  const h = E.createTournament({ players: names(5), courts: 1, scoring: 'games', gamesTarget: 4, restMode: 'half', plannedRounds: 2 });
+  const rng2 = mulberry32(222);
+  E.refillPlanned(h, rng2);
+  for (let r = 0; r < 2; r++) E.setScore(h, r, 0, 4, 1);
+  const base = recompute(h), sth = E.standings(h);
+  for (const row of sth) {
+    const b = base[row.player.id];
+    ok(Math.abs(row.points - (b.points + b.rests * 2)) < 1e-9, `games half-comp: +2/rest for ${row.player.name}`);
+  }
+
+  // rally mode untouched: combined still requires the sum
+  const rl = E.createTournament({ players: names(4), courts: 1, scoring: 'rally', pointsPerMatch: 24, scoreEntry: 'combined' });
+  E.generateRound(rl);
+  assert.throws(() => E.setScore(rl, 0, 0, 10, 10), /add up to 24/, 'rally: combined sum still enforced');
+  E.setScore(rl, 0, 0, 14, 10); ok(rl.rounds[0].matches[0].scoreA === 14, 'rally: combined still works');
+}
+
 // ------------------------------------------------------------------- guards
 console.log('== Creation guards ==');
 {

@@ -605,8 +605,10 @@ const Engine = (() => {
     const cfg = Object.assign({
       format: 'americano',          // 'americano' | 'mexicano'
       courts: 2,
-      pointsPerMatch: 24,
-      scoreEntry: 'combined',       // 'combined' | 'free'
+      scoring: 'rally',             // 'rally' (rally points) | 'games' (first-to-N mini-sets)
+      pointsPerMatch: 24,           // rally mode: combined points per match
+      gamesTarget: 4,               // games mode: first to N games wins (scoreA/scoreB hold games won)
+      scoreEntry: 'combined',       // rally mode: 'combined' | 'free'
       ranking: 'points',            // 'points' | 'wins'
       restMode: 'none',             // sit-out credit: 'none' | 'half' (fixed N/2) | 'avg' (player's own average)
       useSkills: false,             // balance Americano draws by player skill
@@ -909,7 +911,13 @@ const Engine = (() => {
     if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0) {
       throw new Error('Scores must be non-negative whole numbers');
     }
-    if (t.config.scoreEntry === 'combined' && a + b !== t.config.pointsPerMatch) {
+    if (t.config.scoring === 'games') {
+      // strict first-to-N: exactly one side reaches the target, the other is below it
+      const N = t.config.gamesTarget || 4;
+      if (Math.max(a, b) !== N || Math.min(a, b) >= N) {
+        throw new Error('First to ' + N + ' games — the winner needs exactly ' + N);
+      }
+    } else if (t.config.scoreEntry === 'combined' && a + b !== t.config.pointsPerMatch) {
       throw new Error('Scores must add up to ' + t.config.pointsPerMatch);
     }
     m.scoreA = a;
@@ -969,7 +977,10 @@ const Engine = (() => {
     const mode = (t.config.restMode && t.config.restMode !== 'none')
       ? t.config.restMode
       : (t.config.restPoints > 0 ? 'half' : 'none');
-    const half = Math.floor((t.config.pointsPerMatch || 24) / 2);
+    // 'half' base = half a match's worth: half the rally total, or half the games target
+    const half = t.config.scoring === 'games'
+      ? (t.config.gamesTarget || 4) / 2
+      : Math.floor((t.config.pointsPerMatch || 24) / 2);
     for (const s of rows) {
       s.diff = s.pf - s.pa;
       if (mode === 'half') s.points += s.rests * half;
@@ -1176,7 +1187,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v19 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v20 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1194,9 +1205,10 @@ function toast(msg, isErr) {
 }
 
 function mutate(fn) {
-  try { fn(); } catch (e) { toast(e.message, true); return; }
+  try { fn(); } catch (e) { toast(e.message, true); return false; }
   if (T) store.saveCurrent(T);
   render();
+  return true;
 }
 
 /**
@@ -1223,6 +1235,12 @@ function busy(btn, label, fn) {
 
 function pname(pid) { return T ? esc(Engine.playerName(T, pid)) : '?'; }
 
+/* scoring-mode wording: the leaderboard unit is rally points or games won */
+const scoreUnit = cfg => cfg && cfg.scoring === 'games' ? 'games' : 'pts';
+const scoreUnitCap = cfg => cfg && cfg.scoring === 'games' ? 'Games' : 'Pts';
+const matchGoalText = cfg => cfg && cfg.scoring === 'games' ? `first to ${cfg.gamesTarget || 4} games` : `to ${cfg.pointsPerMatch} pts`;
+const restHalfOf = cfg => cfg && cfg.scoring === 'games' ? (cfg.gamesTarget || 4) / 2 : Math.floor((cfg.pointsPerMatch || 24) / 2);
+
 /* ---------------- setup ---------------- */
 
 const SKILL_GLYPH = { 1: '−', 2: '•', 3: '+' };
@@ -1239,9 +1257,11 @@ function defaultSetup() {
     restMode: 'none',
     courts: 2,
     format: 'americano',
+    scoring: 'rally',
     pointsPerMatch: 24,
     customPoints: false,
     scoreEntry: 'combined',
+    gamesTarget: 4,
     ranking: 'points',
     durationMin: 120,
     plannedRounds: null,  // null = auto from duration
@@ -1249,8 +1269,10 @@ function defaultSetup() {
 }
 
 function suggestedRounds(s) {
-  // ~0.6 min per rally point plus ~1.5 min changeover between rounds
-  const perRound = Math.max(7, s.pointsPerMatch * 0.6 + 1.5);
+  // rally: ~0.6 min/point; games: ~3.5 min/game; both + ~1.5 min changeover
+  const perRound = s.scoring === 'games'
+    ? Math.max(8, (s.gamesTarget || 4) * 3.5 + 1.5)
+    : Math.max(7, s.pointsPerMatch * 0.6 + 1.5);
   return Math.max(2, Math.round(s.durationMin / perRound));
 }
 
@@ -1262,6 +1284,9 @@ function renderSetup() {
   const resting = Math.max(0, filled - usedCourts * 4);
   const rounds = s.plannedRounds || suggestedRounds(s);
   const presets = [16, 21, 24, 32];
+  const gamePresets = [3, 4, 5, 6];
+  const isGames = s.scoring === 'games';
+  const restHalf = isGames ? s.gamesTarget / 2 : Math.floor(s.pointsPerMatch / 2);
 
   app.innerHTML = `
   <div class="screen">
@@ -1310,6 +1335,19 @@ function renderSetup() {
         <button data-step="1">+</button>
       </div>
 
+      <div class="field-label">Scoring</div>
+      <div class="seg" id="seg-scoring">
+        <button data-v="rally" class="${!isGames ? 'on' : ''}">Rally points</button>
+        <button data-v="games" class="${isGames ? 'on' : ''}">Games (first to N)</button>
+      </div>
+
+      ${isGames ? `
+      <div class="field-label">Games per match <span class="hint">first to N wins</span></div>
+      <div class="preset-row" id="games-presets">
+        ${gamePresets.map(p => `<button class="chipbtn ${s.gamesTarget === p ? 'on' : ''}" data-gt="${p}">${p}</button>`).join('')}
+      </div>
+      <div class="setup-note">Each round is a mini-set with normal <b>15·30·40 · golden point</b> scoring — first to <b>${s.gamesTarget} games</b> wins. The leaderboard counts <b>games won</b>, not rally points. Enter the games score (e.g. ${s.gamesTarget}–${Math.max(0, s.gamesTarget - 2)}) after each round.</div>
+      ` : `
       <div class="field-label">Points per match</div>
       <div class="preset-row" id="points-presets">
         ${presets.map(p => `<button class="chipbtn ${!s.customPoints && s.pointsPerMatch === p ? 'on' : ''}" data-pts="${p}">${p}</button>`).join('')}
@@ -1325,23 +1363,24 @@ function renderSetup() {
       <div class="setup-note">${s.scoreEntry === 'combined'
         ? 'Enter one team’s points — the other side fills itself. Strict Americano.'
         : 'Enter both numbers, any total — for timed rounds or relaxed counting.'}</div>
+      `}
 
       <div class="field-label">Ranking</div>
       <div class="seg" id="seg-ranking">
-        <button data-v="points" class="${s.ranking === 'points' ? 'on' : ''}">Total points</button>
+        <button data-v="points" class="${s.ranking === 'points' ? 'on' : ''}">${isGames ? 'Total games' : 'Total points'}</button>
         <button data-v="wins" class="${s.ranking === 'wins' ? 'on' : ''}">Wins first</button>
       </div>
 
-      <div class="field-label">Sit-out points</div>
+      <div class="field-label">Sit-out ${isGames ? 'games' : 'points'}</div>
       <div class="seg" id="seg-restcomp">
         <button data-m="none" class="${s.restMode === 'none' ? 'on' : ''}">None</button>
-        <button data-m="half" class="${s.restMode === 'half' ? 'on' : ''}">+${Math.floor(s.pointsPerMatch / 2)} fixed</button>
+        <button data-m="half" class="${s.restMode === 'half' ? 'on' : ''}">+${restHalf} fixed</button>
         <button data-m="avg" class="${s.restMode === 'avg' ? 'on' : ''}">Their avg</button>
       </div>
       <div class="setup-note">${{
-        none: 'When rounds don’t divide evenly, some players get one game more than others. Compensation levels that out.',
-        half: 'Each sit-out credits <b>half the match points</b> — the average score — so resting is neutral for everyone.',
-        avg: 'Each sit-out credits the player’s <b>own points-per-game so far</b> — like ranking by average. Strong players keep their pace while resting.',
+        none: `When rounds don’t divide evenly, some players get one ${isGames ? 'match' : 'game'} more than others. Compensation levels that out.`,
+        half: `Each sit-out credits <b>half a ${isGames ? 'set (' + restHalf + ' games)' : 'match (the average score)'}</b> — so resting is neutral for everyone.`,
+        avg: `Each sit-out credits the player’s <b>own ${isGames ? 'games' : 'points'}-per-${isGames ? 'match' : 'game'} so far</b> — like ranking by average. Strong players keep their pace while resting.`,
       }[s.restMode]} You can switch this anytime — in Settings during the match, or right on the standings.</div>
 
       <div class="field-label">Session</div>
@@ -1358,7 +1397,7 @@ function renderSetup() {
         if (filled < 4) return '';
         const gp = rounds * 4 * usedCourts / filled;
         const lo = Math.floor(gp), hi = Math.ceil(gp);
-        return `<b>≈ ${lo === hi ? lo : lo + '–' + hi} games per player.</b> `;
+        return `<b>≈ ${lo === hi ? lo : lo + '–' + hi} ${isGames ? 'matches' : 'games'} per player.</b> `;
       })()}You can always add extra rounds while playing. Rounds are drawn one at a time, so players can join or leave mid-session.</div>
       </div>
 
@@ -1417,20 +1456,29 @@ function renderSetup() {
     s.plannedRounds = Math.max(1, (s.plannedRounds || suggestedRounds(s)) + (+b.dataset.step));
     renderSetup();
   }));
-  const segHandler = (id, key) => $(id).querySelectorAll('button').forEach(b =>
-    b.addEventListener('click', () => { s[key] = isNaN(+b.dataset.v) ? b.dataset.v : +b.dataset.v; if (key === 'durationMin') s.plannedRounds = null; renderSetup(); }));
+  const segHandler = (id, key) => { const el = $(id); if (el) el.querySelectorAll('button').forEach(b =>
+    b.addEventListener('click', () => { s[key] = isNaN(+b.dataset.v) ? b.dataset.v : +b.dataset.v; if (key === 'durationMin') s.plannedRounds = null; renderSetup(); })); };
   segHandler('#seg-format', 'format');
+  segHandler('#seg-scoring', 'scoring');
   segHandler('#seg-entry', 'scoreEntry');
   segHandler('#seg-ranking', 'ranking');
   segHandler('#seg-duration', 'durationMin');
-  $('#points-presets').querySelectorAll('[data-pts]').forEach(b => b.addEventListener('click', () => {
+  const gp = $('#games-presets');
+  if (gp) gp.querySelectorAll('[data-gt]').forEach(b => b.addEventListener('click', () => {
+    s.gamesTarget = +b.dataset.gt; s.plannedRounds = null; renderSetup();
+  }));
+  const pp = $('#points-presets');
+  if (pp) pp.querySelectorAll('[data-pts]').forEach(b => b.addEventListener('click', () => {
     s.pointsPerMatch = +b.dataset.pts; s.customPoints = false; s.plannedRounds = null; renderSetup();
   }));
-  $('#custom-pts').addEventListener('input', e => {
-    const v = parseInt(e.target.value, 10);
-    if (v >= 2) { s.pointsPerMatch = v; s.customPoints = true; s.plannedRounds = null; updateSetupMeta(); }
-  });
-  $('#custom-pts').addEventListener('blur', () => renderSetup());
+  const cp = $('#custom-pts');
+  if (cp) {
+    cp.addEventListener('input', e => {
+      const v = parseInt(e.target.value, 10);
+      if (v >= 2) { s.pointsPerMatch = v; s.customPoints = true; s.plannedRounds = null; updateSetupMeta(); }
+    });
+    cp.addEventListener('blur', () => renderSetup());
+  }
   $('#start-btn').addEventListener('click', e => busy(e.currentTarget, 'Drawing round 1…', startTournament));
   const sh = $('#show-history');
   if (sh) sh.addEventListener('click', () => openHistorySheet());
@@ -1465,8 +1513,10 @@ function startTournament() {
       restMode: s.restMode,
       courts: s.courts,
       format: s.format,
+      scoring: s.scoring,
       pointsPerMatch: s.pointsPerMatch,
-      scoreEntry: s.scoreEntry,
+      gamesTarget: s.gamesTarget,
+      scoreEntry: s.scoring === 'games' ? 'free' : s.scoreEntry,
       ranking: s.ranking,
       plannedRounds: s.plannedRounds || suggestedRounds(s),
       durationMin: s.durationMin,
@@ -1508,7 +1558,7 @@ function renderPlay() {
     <div class="topbar">
       <div class="grow">
         <div class="tname">${esc(T.config.name)}</div>
-        <div class="tsub">${T.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${Engine.activePlayers(T).length} players · to ${T.config.pointsPerMatch} pts · round ${Math.min(viewRound + 1, T.rounds.length)}/${Math.max(T.config.plannedRounds, T.rounds.length)}</div>
+        <div class="tsub">${T.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${Engine.activePlayers(T).length} players · ${matchGoalText(T.config)} · round ${Math.min(viewRound + 1, T.rounds.length)}/${Math.max(T.config.plannedRounds, T.rounds.length)}</div>
       </div>
       <div class="timer-chip" id="timer-chip" title="Session time left — tap for details">⏳ ${timerText()}</div>
       <button class="menu-btn" id="menu-btn" aria-label="Menu">⋯</button>
@@ -1751,7 +1801,7 @@ function renderStandingsTab() {
     <div class="pane-title">Standings</div>
     <table class="stand-table">
       <thead><tr>
-        <th></th><th>Player</th><th>Pts</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}
+        <th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}
       </tr></thead>
       <tbody>
         ${st.map((s, i) => {
@@ -1776,19 +1826,20 @@ function renderStandingsTab() {
     </table>
     ${hasRests ? (() => {
       const mode = T.config.restMode || (T.config.restPoints > 0 ? 'half' : 'none');
-      const half = Math.floor(T.config.pointsPerMatch / 2);
+      const half = restHalfOf(T.config);
       return `
-    <div class="field-label" style="margin-top:16px">Sit-out points <span class="hint">recomputes live</span></div>
+    <div class="field-label" style="margin-top:16px">Sit-out ${scoreUnit(T.config)} <span class="hint">recomputes live</span></div>
     <select class="pill-select" id="stand-rest">
       <option value="none" ${mode === 'none' ? 'selected' : ''}>None</option>
       <option value="half" ${mode === 'half' ? 'selected' : ''}>+${half} fixed</option>
       <option value="avg" ${mode === 'avg' ? 'selected' : ''}>Their avg</option>
     </select>`;
     })() : ''}
-    <div class="setup-note" style="margin-top:14px">Ranked by ${T.config.ranking === 'wins' ? '<b>wins</b>, then points' : '<b>total points</b>'}, then point difference. ${(() => {
+    <div class="setup-note" style="margin-top:14px">Ranked by ${T.config.ranking === 'wins' ? `<b>wins</b>, then ${scoreUnit(T.config)}` : `<b>total ${scoreUnit(T.config)}</b>`}, then ${T.config.scoring === 'games' ? 'game' : 'point'} difference. ${(() => {
       const mode = T.config.restMode || (T.config.restPoints > 0 ? 'half' : 'none');
-      return mode === 'half' ? `Each sit-out credits <b>+${Math.floor(T.config.pointsPerMatch / 2)} pts</b> (fixed).`
-        : mode === 'avg' ? 'Each sit-out credits the player’s <b>own points-per-game</b>.'
+      const unit = scoreUnit(T.config);
+      return mode === 'half' ? `Each sit-out credits <b>+${restHalfOf(T.config)} ${unit}</b> (fixed).`
+        : mode === 'avg' ? `Each sit-out credits the player’s <b>own ${unit}-per-${T.config.scoring === 'games' ? 'match' : 'game'}</b>.`
         : 'Sitting out earns nothing — the draw keeps everyone’s games even (±1).';
     })()} Tap a match card to enter scores.</div>`;
 
@@ -1802,11 +1853,13 @@ function renderStandingsTab() {
 
 function openScoreSheet(r, mi) {
   const m = T.rounds[r].matches[mi];
-  const N = T.config.pointsPerMatch;
-  const combined = T.config.scoreEntry === 'combined';
+  const games = T.config.scoring === 'games';
+  const N = games ? (T.config.gamesTarget || 4) : T.config.pointsPerMatch;
+  const combined = !games && T.config.scoreEntry === 'combined';
+  // games default: a fresh card starts at the winning target vs 0 (a valid first-to-N)
   scoreCtx = {
     r, mi,
-    a: m.scoreA !== null ? m.scoreA : (combined ? Math.floor(N / 2) : 0),
+    a: m.scoreA !== null ? m.scoreA : (combined ? Math.floor(N / 2) : games ? N : 0),
     b: m.scoreB !== null ? m.scoreB : (combined ? Math.ceil(N / 2) : 0),
     existing: m.scoreA !== null,
   };
@@ -1816,8 +1869,10 @@ function openScoreSheet(r, mi) {
 function renderScoreSheet() {
   const { r, mi, a, b } = scoreCtx;
   const m = T.rounds[r].matches[mi];
-  const N = T.config.pointsPerMatch;
-  const combined = T.config.scoreEntry === 'combined';
+  const games = T.config.scoring === 'games';
+  const N = games ? (T.config.gamesTarget || 4) : T.config.pointsPerMatch;
+  const combined = !games && T.config.scoreEntry === 'combined';
+  const capMax = games ? N : null; // games: each side 0..N
 
   let ov = $('#score-overlay');
   if (!ov) {
@@ -1834,17 +1889,18 @@ function renderScoreSheet() {
     <div class="sheet">
       <div class="grab"></div>
       <h3>Round ${r + 1} · Court ${mi + 1}</h3>
-      <div class="sub">${combined ? `Points add up to ${N} — set one side, the other follows.` : 'Enter both team scores.'}</div>
+      <div class="sub">${combined ? `Points add up to ${N} — set one side, the other follows.`
+        : games ? `Games won — first to <b>${N}</b> wins the set.` : 'Enter both team scores.'}</div>
       <div class="score-grid">
         <div class="score-team ${a > b ? 'winning' : ''}" id="st-a">
           <div class="names">${pname(m.teamA[0])}<br>${pname(m.teamA[1])}</div>
-          <input class="bignum" id="bn-a" type="number" inputmode="numeric" min="0" ${combined ? `max="${N}"` : ''} value="${a}">
+          <input class="bignum" id="bn-a" type="number" inputmode="numeric" min="0" ${combined || games ? `max="${N}"` : ''} value="${a}">
           <div class="pmrow"><button data-t="a" data-d="-1">−</button><button data-t="a" data-d="1">+</button></div>
         </div>
         <div class="score-colon">:</div>
         <div class="score-team ${b > a ? 'winning' : ''}" id="st-b">
           <div class="names">${pname(m.teamB[0])}<br>${pname(m.teamB[1])}</div>
-          <input class="bignum" id="bn-b" type="number" inputmode="numeric" min="0" ${combined ? `max="${N}"` : ''} value="${b}">
+          <input class="bignum" id="bn-b" type="number" inputmode="numeric" min="0" ${combined || games ? `max="${N}"` : ''} value="${b}">
           <div class="pmrow"><button data-t="b" data-d="-1">−</button><button data-t="b" data-d="1">+</button></div>
         </div>
       </div>
@@ -1864,8 +1920,11 @@ function renderScoreSheet() {
       const na = Math.max(0, Math.min(N, t === 'a' ? scoreCtx.a + d : scoreCtx.a - d));
       scoreCtx.a = na;
       scoreCtx.b = N - na;
-    } else if (t === 'a') scoreCtx.a = Math.max(0, scoreCtx.a + d);
-    else scoreCtx.b = Math.max(0, scoreCtx.b + d);
+    } else {
+      const cap = v => capMax === null ? Math.max(0, v) : Math.max(0, Math.min(capMax, v));
+      if (t === 'a') scoreCtx.a = cap(scoreCtx.a + d);
+      else scoreCtx.b = cap(scoreCtx.b + d);
+    }
     lightUpdate(); // in-place, same as the slider — no sheet re-render per press
   }));
   const bnA = $('#bn-a'), bnB = $('#bn-b');
@@ -1907,15 +1966,17 @@ function renderScoreSheet() {
         if (v !== parseInt(inp.value, 10)) inp.value = v;
         scoreCtx.a = inp === bnA ? v : N - v;
         scoreCtx.b = N - scoreCtx.a;
-      } else if (inp === bnA) scoreCtx.a = v;
-      else scoreCtx.b = v;
+      } else {
+        if (capMax !== null && v > capMax) { v = capMax; inp.value = v; }
+        if (inp === bnA) scoreCtx.a = v; else scoreCtx.b = v;
+      }
       lightUpdate();
     });
     inp.addEventListener('blur', () => { inp.value = inp === bnA ? scoreCtx.a : scoreCtx.b; });
   });
   $('#score-save').addEventListener('click', () => {
-    mutate(() => Engine.setScore(T, r, mi, scoreCtx.a, scoreCtx.b));
-    closeScoreSheet();
+    // keep the sheet open if the score is rejected (e.g. games mode needs a first-to-N result)
+    if (mutate(() => Engine.setScore(T, r, mi, scoreCtx.a, scoreCtx.b))) closeScoreSheet();
   });
   const sc = $('#score-cancel');
   if (sc) sc.addEventListener('click', closeScoreSheet);
@@ -2049,7 +2110,7 @@ function openPlayersSheet(editPid) {
             ? `<input id="pl-edit" value="${esc(p.name)}" autocomplete="off" enterkeyhint="done">`
             : `<div style="flex:1;min-width:0">
                  <div style="font-weight:600">${esc(p.name)}${p.active ? '' : ' (left)'}</div>
-                 <div class="pstat">${Math.round(byId[p.id].points)} pts · ${byId[p.id].played} games · ${byId[p.id].rests} rests</div>
+                 <div class="pstat">${Math.round(byId[p.id].points)} ${scoreUnit(T.config)} · ${byId[p.id].played} ${T.config.scoring === 'games' ? 'matches' : 'games'} · ${byId[p.id].rests} rests</div>
                </div>`}
           ${p.id === editPid
             ? `<button class="del" id="pl-save" style="color:var(--lime)">✓</button>`
@@ -2108,8 +2169,9 @@ function openPlayersSheet(editPid) {
 
 function openSettingsSheet() {
   const c = T.config;
-  const restVal = Math.max(1, Math.floor(c.pointsPerMatch / 2));
+  const restVal = Math.max(1, restHalfOf(c));
   const restMode = c.restMode || (c.restPoints > 0 ? 'half' : 'none');
+  const unit = scoreUnit(c);
   const ov = sheet(`
     <div class="grab"></div>
     <h3>Settings</h3>
@@ -2120,7 +2182,7 @@ function openSettingsSheet() {
     <div class="stepper" id="set-rounds"><button data-d="-1">−</button><div class="stepper-val">${c.plannedRounds}</div><button data-d="1">+</button></div>
     <div class="field-label">Ranking</div>
     <div class="seg" id="set-ranking">
-      <button data-v="points" class="${c.ranking === 'points' ? 'on' : ''}">Total points</button>
+      <button data-v="points" class="${c.ranking === 'points' ? 'on' : ''}">Total ${unit}</button>
       <button data-v="wins" class="${c.ranking === 'wins' ? 'on' : ''}">Wins first</button>
     </div>
     ${c.format === 'americano' ? `
@@ -2136,7 +2198,7 @@ function openSettingsSheet() {
       <button data-m="half" class="${restMode === 'half' ? 'on' : ''}">+${restVal} fixed</button>
       <button data-m="avg" class="${restMode === 'avg' ? 'on' : ''}">Their avg</button>
     </div>
-    <div class="setup-note">Fixed: half the match total per sit-out — neutral for everyone. Their avg: each rest credits that player's own points-per-game — strong players keep their pace. Standings recompute instantly either way.</div>
+    <div class="setup-note">Fixed: ${c.scoring === 'games' ? `half the games target (${restVal}) per sit-out` : 'half the match total per sit-out'} — neutral for everyone. Their avg: each rest credits that player's own ${unit}-per-${c.scoring === 'games' ? 'match' : 'game'} — strong players keep their pace. Standings recompute instantly either way.</div>
     <div class="field-label">Round timer</div>
     <div class="seg" id="set-timer">
       ${[0, 10, 12, 15, 20].map(mn => `<button data-v="${mn}" class="${(c.roundTimerMin || 0) === mn ? 'on' : ''}">${mn ? mn + 'm' : 'Off'}</button>`).join('')}
@@ -2187,6 +2249,7 @@ function openHelpSheet() {
       <p><b>Fair draws</b> — nobody sits out twice in a row, everyone's game count stays within ±1, and partners repeat only when mathematically unavoidable. Sit-out counts are shown next to resting players and in the standings.</p>
       <p><b>The schedule</b> — Americano draws every planned round upfront so you can see the whole evening. Rounds beyond the one being played are marked <b>provisional</b>: they redraw instantly if players, courts or skill badges change, and they can't be scored until it's their turn. Played scores are never touched. Mexicano draws each round only after the previous finishes — its pairings depend on the live standings.</p>
       <p><b>Sitting out</b> — earns nothing by default. Two compensation options (at setup, in Settings, or right on the standings — switch anytime, standings recompute instantly): <b>fixed</b> +half the match points per rest (neutral — resting neither costs nor pays), or <b>their avg</b> — each rest credits that player's own points-per-game, like ranking by average, so strong players keep their pace while resting.</p>
+      <p><b>Rally points vs games</b> — pick your scoring at setup. <b>Rally points:</b> each match races to a combined total (e.g. 24) and the leaderboard adds up every point you bank. <b>Games (first to N):</b> each round is a mini-set played with normal 15·30·40 golden-point scoring — first to N games (usually 4) wins — and the leaderboard counts games won, not rally points. Enter the games score (e.g. 4–2) after each round. In Mexicano with games, early draws are coarser because game totals tie often; they settle as rounds add up.</p>
       <p><b>Scores</b> — tap any court card to enter or fix a score, in any round, anytime. Standings always recompute from the raw scores.</p>
       <p><b>Players</b> — Menu → Players to add, rename, remove or rejoin someone mid-session. Draws adapt from the next round; results already played are kept.</p>
       <p><b>Skill levels (optional)</b> — turn on at setup or in Settings, then give each player a badge: <b>+</b> stronger, <b>•</b> middle, <b>−</b> weaker — always relative to your group, not an official rating. Americano draws then avoid obviously lopsided matches (the two strongest never team up against the two weakest), while still rotating partners. A one-step gap is considered normal padel and stays allowed.</p>
@@ -2317,7 +2380,7 @@ function openReplaySheet(entry) {
 
     <div class="field-label">Final standings</div>
     <table class="stand-table">
-      <thead><tr><th></th><th>Player</th><th>Pts</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
+      <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(snap.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
       <tbody>
         ${st.map((s, i) => `
           <tr class="top${i + 1}">
@@ -2437,7 +2500,7 @@ function statHighlightsHTML(t, st, prog) {
       if (!br || hi > br.score) br = { score: hi, team: m.scoreA >= m.scoreB ? m.teamA : m.teamB, round: ri + 1 };
     }
   });
-  if (br) cards.push(card('🔥', 'Best round', `${nm(br.team[0])} &amp; ${nm(br.team[1])}`, `${br.score} pts in round ${br.round}`));
+  if (br) cards.push(card('🔥', 'Best round', `${nm(br.team[0])} &amp; ${nm(br.team[1])}`, `${br.score} ${scoreUnit(t.config)} in round ${br.round}`));
 
   // closest finish = smallest gap between adjacent finishers who played
   const played = st.filter(s => s.played > 0);
@@ -2447,7 +2510,7 @@ function statHighlightsHTML(t, st, prog) {
       const gap = Math.round(played[i - 1].points) - Math.round(played[i].points);
       if (cf === null || gap < cf.gap) cf = { gap, a: played[i - 1].player.id, b: played[i].player.id };
     }
-    if (cf) cards.push(card('⚔️', 'Closest finish', `${nm(cf.a)} vs ${nm(cf.b)}`, cf.gap === 0 ? 'dead level on points' : `just ${cf.gap} pt${cf.gap > 1 ? 's' : ''} apart`));
+    if (cf) cards.push(card('⚔️', 'Closest finish', `${nm(cf.a)} vs ${nm(cf.b)}`, cf.gap === 0 ? `dead level on ${scoreUnit(t.config)}` : `just ${cf.gap} ${t.config.scoring === 'games' ? 'game' : 'pt'}${cf.gap > 1 ? 's' : ''} apart`));
   }
 
   if (!cards.length) return '';
@@ -2491,9 +2554,9 @@ function copyStandings() {
   const medals = ['🥇', '🥈', '🥉'];
   const lines = [
     `🎾 ${T.config.name} — ${new Date(T.createdAt || Date.now()).toLocaleDateString()}`,
-    `${T.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${T.rounds.length} rounds · to ${T.config.pointsPerMatch} pts`,
+    `${T.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${T.rounds.length} rounds · ${matchGoalText(T.config)}`,
     '',
-    ...st.map((s, i) => `${medals[i] || (i + 1) + '.'} ${s.player.name} — ${Math.round(s.points)} pts (${s.wins}W ${s.draws}D ${s.losses}L, ${s.diff > 0 ? '+' : ''}${s.diff})`),
+    ...st.map((s, i) => `${medals[i] || (i + 1) + '.'} ${s.player.name} — ${Math.round(s.points)} ${scoreUnit(T.config)} (${s.wins}W ${s.draws}D ${s.losses}L, ${s.diff > 0 ? '+' : ''}${s.diff})`),
   ];
   copyText(lines.join('\n'), 'Standings copied');
 }
@@ -2548,13 +2611,13 @@ function renderResults() {
         <h2>Final standings</h2>
         <div class="sub">${esc(T.config.name)} · ${T.rounds.length} rounds · ${new Date(T.createdAt || Date.now()).toLocaleDateString()}</div>
         <div class="podium">
-          ${p2 ? `<div class="pod p2"><div class="pname">${esc(p2.player.name)}</div><div class="ppts">${Math.round(p2.points)} pts</div><div class="block">2</div></div>` : ''}
-          ${p1 ? `<div class="pod p1"><div class="pname">${esc(p1.player.name)}</div><div class="ppts">${Math.round(p1.points)} pts</div><div class="block">1</div></div>` : ''}
-          ${p3 ? `<div class="pod p3"><div class="pname">${esc(p3.player.name)}</div><div class="ppts">${Math.round(p3.points)} pts</div><div class="block">3</div></div>` : ''}
+          ${p2 ? `<div class="pod p2"><div class="pname">${esc(p2.player.name)}</div><div class="ppts">${Math.round(p2.points)} ${scoreUnit(T.config)}</div><div class="block">2</div></div>` : ''}
+          ${p1 ? `<div class="pod p1"><div class="pname">${esc(p1.player.name)}</div><div class="ppts">${Math.round(p1.points)} ${scoreUnit(T.config)}</div><div class="block">1</div></div>` : ''}
+          ${p3 ? `<div class="pod p3"><div class="pname">${esc(p3.player.name)}</div><div class="ppts">${Math.round(p3.points)} ${scoreUnit(T.config)}</div><div class="block">3</div></div>` : ''}
         </div>
       </div>
       <table class="stand-table">
-        <thead><tr><th></th><th>Player</th><th>Pts</th><th>±</th><th>W·D·L</th></tr></thead>
+        <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th></tr></thead>
         <tbody>
           ${st.map((s, i) => `
             <tr class="top${i + 1}">
