@@ -416,6 +416,33 @@ body.sheet-lock { position: fixed; left: 0; right: 0; overflow: hidden; }
 .rr-score .d { color: var(--txt-faint); margin: 0 2px; font-weight: 400; }
 .rr-rest { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--bg2); font-size: .78rem; color: var(--amber); }
 
+/* score views: bump chart · highlights · head-to-head */
+.score-views { margin-top: 20px; }
+.sv-block { margin-top: 18px; }
+.sv-block:first-child { margin-top: 0; }
+.sv-title { font-family: var(--disp); font-weight: 800; text-transform: uppercase; letter-spacing: .05em; font-size: 1.05rem; color: var(--txt); margin-bottom: 2px; }
+.sv-sub { color: var(--txt-dim); font-size: .82rem; margin-bottom: 10px; line-height: 1.45; }
+.bump-svg { display: block; background: var(--bg1); border: 1px solid var(--line); border-radius: 12px; padding: 8px 4px; }
+.stat-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat-card { background: var(--bg1); border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; }
+.stat-card .sc-ico { font-size: 1.15rem; line-height: 1; }
+.stat-card .sc-label { font-family: var(--disp); font-weight: 700; text-transform: uppercase; letter-spacing: .06em; font-size: .67rem; color: var(--txt-faint); margin-top: 5px; }
+.stat-card .sc-big { font-weight: 700; font-size: .96rem; color: var(--txt); margin-top: 2px; line-height: 1.2; }
+.stat-card .sc-sub { color: var(--txt-dim); font-size: .79rem; margin-top: 2px; line-height: 1.3; }
+.h2h-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 12px; }
+.h2h-matrix { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.h2h-matrix th, .h2h-matrix td { padding: 7px 6px; font-size: .8rem; text-align: center; border-bottom: 1px solid var(--bg2); white-space: nowrap; }
+.h2h-matrix tr:last-child td, .h2h-matrix tr:last-child th { border-bottom: none; }
+.h2h-matrix thead th { color: var(--txt-faint); font-weight: 700; background: var(--bg2); }
+.h2h-corner { position: sticky; left: 0; z-index: 3; background: var(--bg2); }
+.h2h-row { position: sticky; left: 0; z-index: 1; background: var(--bg1); text-align: left !important; font-weight: 600; color: var(--txt-dim); min-width: 92px; }
+.h2h-col { min-width: 30px; }
+.h2h-diag { color: var(--txt-faint); background: var(--bg2); }
+.h2h-na { color: var(--txt-faint); }
+.h2h-cell.pos { color: var(--lime); font-weight: 700; }
+.h2h-cell.neg { color: var(--red); font-weight: 700; }
+.h2h-cell.evn { color: var(--txt-dim); }
+
 /* toast */
 #toast {
   position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(20px);
@@ -958,6 +985,54 @@ const Engine = (() => {
     return rows;
   }
 
+  // ---------- score views (read-only analytics) ----------
+
+  /**
+   * Standings after each scored round — the rank/points timeline behind the
+   * bump chart and climber stats. Returns one entry per round that has any
+   * score, in round order: { round (1-based), order:[pid…best→worst],
+   * rank:{pid:index}, points:{pid:pts} }. Pure — never mutates t.
+   */
+  function progression(t) {
+    const steps = [];
+    for (let ri = 0; ri < t.rounds.length; ri++) {
+      if (!anyScores(t.rounds[ri])) continue;
+      // standings on the state as it stood after round ri (rounds are read-only here)
+      const partial = { players: t.players, config: t.config, rounds: t.rounds.slice(0, ri + 1) };
+      const st = standings(partial);
+      const rank = {}, points = {};
+      st.forEach((s, i) => { rank[s.player.id] = i; points[s.player.id] = s.points; });
+      steps.push({ round: ri + 1, order: st.map(s => s.player.id), rank, points });
+    }
+    return steps;
+  }
+
+  /**
+   * Opponent head-to-head records. Americano rotates partners, so "vs" means
+   * being on the opposing team. Returns { [pid]: { [oid]: {faced, wins, losses,
+   * draws, net} } } where net = Σ(myTeamScore − theirTeamScore) over shared
+   * matches. net[a][b] === −net[b][a]; faced is symmetric. Pure.
+   */
+  function headToHead(t) {
+    const h2h = {};
+    for (const p of t.players) h2h[p.id] = {};
+    const bump = (a, b, mine, theirs) => {
+      const rec = h2h[a][b] || (h2h[a][b] = { faced: 0, wins: 0, losses: 0, draws: 0, net: 0 });
+      rec.faced++; rec.net += mine - theirs;
+      if (mine > theirs) rec.wins++; else if (mine === theirs) rec.draws++; else rec.losses++;
+    };
+    for (const r of t.rounds) {
+      for (const m of r.matches) {
+        if (m.scoreA === null || m.scoreB === null) continue;
+        for (const a of m.teamA) for (const b of m.teamB) {
+          bump(a, b, m.scoreA, m.scoreB);
+          bump(b, a, m.scoreB, m.scoreA);
+        }
+      }
+    }
+    return h2h;
+  }
+
   // ---------- roster changes ----------
   // every change that affects fairness or balance redraws the unplayed rounds
 
@@ -1025,7 +1100,7 @@ const Engine = (() => {
   return {
     createTournament, generateRound, regenerateRound, refillPlanned, redrawFuture,
     setPlannedRounds, setScore, clearScore,
-    roundComplete, standings, addPlayer, removePlayer, reactivatePlayer,
+    roundComplete, standings, progression, headToHead, addPlayer, removePlayer, reactivatePlayer,
     renamePlayer, setCourts, setSkill, activePlayers,
     courtsUsed, historyCounts, playerName, anyScores,
   };
@@ -1101,7 +1176,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v18 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v19 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -2258,6 +2333,8 @@ function openReplaySheet(entry) {
       </tbody>
     </table>
 
+    ${scoreViewsHTML(snap)}
+
     <div class="field-label" style="margin-top:18px">Round by round</div>
     <div class="replay-rounds">
       ${playedRounds.length === 0 ? '<div class="sub">No rounds were scored.</div>' : playedRounds.map(r => {
@@ -2280,6 +2357,133 @@ function openReplaySheet(entry) {
       }).join('')}
     </div>`);
   ov.querySelector('#rp-back').addEventListener('click', openHistorySheet);
+}
+
+/* ---------------- score views (bump chart · highlights · head-to-head) ---------------- */
+/* Static, read-only analytics rendered from a finished tournament object — used
+   on the results screen (live T) and inside replays (a stored snapshot). */
+
+const VIEW_COLORS = ['#cdf545', '#5fd4f5', '#f5b945', '#f56960', '#b794f6', '#4fd1a5', '#f78fb3', '#7aa5ff', '#e0c068', '#9aa7b3', '#7fd1c0', '#d98fe0'];
+
+function scoreViewsHTML(t) {
+  const st = Engine.standings(t);
+  const prog = Engine.progression(t);
+  if (prog.length === 0) return ''; // nothing scored — no story to tell yet
+  const h2h = Engine.headToHead(t);
+  const blocks = bumpChartHTML(t, st, prog) + statHighlightsHTML(t, st, prog) + h2hMatrixHTML(t, st, h2h);
+  return blocks ? `<div class="score-views">${blocks}</div>` : '';
+}
+
+function bumpChartHTML(t, st, prog) {
+  const players = st.filter(s => s.played > 0);
+  if (prog.length < 2 || players.length < 2) return ''; // need movement to show
+  const total = st.length;
+  const colorOf = {};
+  st.forEach((s, i) => { colorOf[s.player.id] = VIEW_COLORS[i % VIEW_COLORS.length]; });
+
+  const W = 340, mL = 12, mR = 96, mT = 10, mB = 22;
+  const rowGap = Math.min(26, Math.max(15, Math.floor(150 / Math.max(1, total - 1))));
+  const H = mT + (total - 1) * rowGap + mB;
+  const plotW = W - mL - mR;
+  const xOf = i => mL + (prog.length === 1 ? 0 : (i / (prog.length - 1)) * plotW);
+  const yOf = rank => mT + rank * rowGap;
+
+  const lines = players.map(s => {
+    const pid = s.player.id, col = colorOf[pid];
+    const pts = prog.map((step, i) => `${xOf(i).toFixed(1)},${yOf(step.rank[pid]).toFixed(1)}`).join(' ');
+    const dots = prog.map((step, i) => `<circle cx="${xOf(i).toFixed(1)}" cy="${yOf(step.rank[pid]).toFixed(1)}" r="2.6" fill="${col}"/>`).join('');
+    const finalRank = prog[prog.length - 1].rank[pid];
+    const label = `<text x="${mL + plotW + 6}" y="${(yOf(finalRank) + 3.5).toFixed(1)}" fill="${col}" font-size="11" font-weight="700">${esc(s.player.name).slice(0, 12)}</text>`;
+    return `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" opacity="0.95"/>${dots}${label}`;
+  }).join('');
+  const xlabels = prog.map((step, i) => `<text x="${xOf(i).toFixed(1)}" y="${H - 6}" fill="#5d6b77" font-size="9" text-anchor="middle">${step.round}</text>`).join('');
+
+  return `
+    <div class="sv-block">
+      <div class="sv-title">Rank timeline</div>
+      <div class="sv-sub">Who moved up or down each round — 1st sits at the top.</div>
+      <svg class="bump-svg" viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Rank over the rounds">${lines}${xlabels}</svg>
+    </div>`;
+}
+
+function statHighlightsHTML(t, st, prog) {
+  const nm = pid => esc(Engine.playerName(t, pid));
+  const card = (ico, label, big, sub) =>
+    `<div class="stat-card"><div class="sc-ico">${ico}</div><div class="sc-label">${label}</div><div class="sc-big">${big}</div><div class="sc-sub">${sub}</div></div>`;
+  const cards = [];
+
+  // biggest climber (first scored round → final); else wire-to-wire leader
+  if (prog.length >= 2) {
+    const first = prog[0].rank, lastStep = prog[prog.length - 1];
+    let best = null;
+    for (const s of st) {
+      if (s.played <= 0) continue;
+      const d = (first[s.player.id] ?? 0) - lastStep.rank[s.player.id]; // + = climbed up the table
+      if (d > 0 && (!best || d > best.d)) best = { id: s.player.id, d };
+    }
+    if (best) cards.push(card('🚀', 'Biggest climber', nm(best.id), `up ${best.d} place${best.d > 1 ? 's' : ''} since round ${prog[0].round}`));
+    else {
+      const winner = lastStep.order[0];
+      if (prog.every(s => s.order[0] === winner)) cards.push(card('🏁', 'Wire to wire', nm(winner), `top of the table from round ${prog[0].round} on`));
+    }
+  }
+
+  // best single round = highest individual match score
+  let br = null;
+  t.rounds.forEach((r, ri) => {
+    for (const m of r.matches) {
+      if (m.scoreA === null || m.scoreB === null) continue;
+      const hi = Math.max(m.scoreA, m.scoreB);
+      if (!br || hi > br.score) br = { score: hi, team: m.scoreA >= m.scoreB ? m.teamA : m.teamB, round: ri + 1 };
+    }
+  });
+  if (br) cards.push(card('🔥', 'Best round', `${nm(br.team[0])} &amp; ${nm(br.team[1])}`, `${br.score} pts in round ${br.round}`));
+
+  // closest finish = smallest gap between adjacent finishers who played
+  const played = st.filter(s => s.played > 0);
+  if (played.length >= 2) {
+    let cf = null;
+    for (let i = 1; i < played.length; i++) {
+      const gap = Math.round(played[i - 1].points) - Math.round(played[i].points);
+      if (cf === null || gap < cf.gap) cf = { gap, a: played[i - 1].player.id, b: played[i].player.id };
+    }
+    if (cf) cards.push(card('⚔️', 'Closest finish', `${nm(cf.a)} vs ${nm(cf.b)}`, cf.gap === 0 ? 'dead level on points' : `just ${cf.gap} pt${cf.gap > 1 ? 's' : ''} apart`));
+  }
+
+  if (!cards.length) return '';
+  return `<div class="sv-block"><div class="sv-title">Highlights</div><div class="stat-cards">${cards.join('')}</div></div>`;
+}
+
+function h2hMatrixHTML(t, st, h2h) {
+  const players = st.filter(s => s.played > 0);
+  if (players.length < 2) return '';
+  let anyFaced = false;
+  for (const a of players) { for (const b of players) { if (a.player.id !== b.player.id && h2h[a.player.id][b.player.id]) { anyFaced = true; break; } } if (anyFaced) break; }
+  if (!anyFaced) return '';
+
+  const head = players.map((s, j) => `<th class="h2h-col">${j + 1}</th>`).join('');
+  const rows = players.map((s, i) => {
+    const cells = players.map((o, j) => {
+      if (i === j) return '<td class="h2h-diag">·</td>';
+      const rec = h2h[s.player.id][o.player.id];
+      if (!rec || !rec.faced) return '<td class="h2h-na">–</td>';
+      const cls = rec.net > 0 ? 'pos' : rec.net < 0 ? 'neg' : 'evn';
+      return `<td class="h2h-cell ${cls}" title="${esc(s.player.name)} vs ${esc(o.player.name)}: ${rec.wins}W ${rec.draws}D ${rec.losses}L">${rec.net > 0 ? '+' : ''}${rec.net}</td>`;
+    }).join('');
+    return `<tr><th class="h2h-row">${i + 1}. ${esc(s.player.name).slice(0, 10)}</th>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <div class="sv-block">
+      <div class="sv-title">Head to head</div>
+      <div class="sv-sub">Net points when two players were on opposing teams — <span style="color:var(--lime)">green ahead</span>, <span style="color:var(--red)">red behind</span>. Columns are the numbered players.</div>
+      <div class="h2h-scroll">
+        <table class="h2h-matrix">
+          <thead><tr><th class="h2h-corner"></th>${head}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function copyStandings() {
@@ -2362,6 +2566,7 @@ function renderResults() {
             </tr>`).join('')}
         </tbody>
       </table>
+      ${scoreViewsHTML(T)}
       <div class="round-actions" style="margin-top:24px">
         <button class="btn btn-primary btn-block" id="res-share">📋 Copy results</button>
         <button class="btn btn-ghost btn-block" id="res-new">Start a new tournament</button>

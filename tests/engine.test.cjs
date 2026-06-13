@@ -617,6 +617,61 @@ console.log('== Skill-balanced draws ==');
   ok(stackedSeen, 'useSkills off: skills correctly ignored (stacked pair seen)');
 }
 
+// -------------------------------------------------- score views (analytics)
+console.log('== Score views: progression + head-to-head ==');
+{
+  const rng = mulberry32(987654);
+  const t = E.createTournament({ players: names(8), courts: 2, pointsPerMatch: 24, plannedRounds: 6 });
+  for (let r = 0; r < 6; r++) {
+    const round = E.generateRound(t, rng);
+    for (let mi = 0; mi < round.matches.length; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, r, mi, a, b); }
+  }
+  const finalSt = E.standings(t);
+
+  // ---- progression (rank/points timeline) ----
+  const prog = E.progression(t);
+  ok(prog.length === 6, `progression: one step per scored round (got ${prog.length})`);
+  for (let i = 1; i < prog.length; i++) ok(prog[i].round > prog[i - 1].round, 'progression: round numbers increase');
+  for (const step of prog) {
+    ok(step.order.length === t.players.length, 'progression: every step ranks all players');
+    step.order.forEach((pid, i) => ok(step.rank[pid] === i, 'progression: rank map matches order'));
+  }
+  const last = prog[prog.length - 1];
+  ok(JSON.stringify(last.order) === JSON.stringify(finalSt.map(s => s.player.id)), 'progression: final order == standings');
+  for (const s of finalSt) ok(Math.abs(last.points[s.player.id] - s.points) < 1e-9, `progression: final pts == standings (${s.player.name})`);
+  // partial step matches a fresh standings on the sliced rounds
+  {
+    const partial = { players: t.players, config: t.config, rounds: t.rounds.slice(0, 3) };
+    const st3 = E.standings(partial);
+    ok(JSON.stringify(prog[2].order) === JSON.stringify(st3.map(s => s.player.id)), 'progression: step 3 == standings of first 3 rounds');
+  }
+  // purity
+  const before = JSON.stringify(t);
+  E.progression(t);
+  ok(JSON.stringify(t) === before, 'progression: pure (no mutation)');
+
+  // ---- head-to-head ----
+  const h2h = E.headToHead(t);
+  E.headToHead(t);
+  ok(JSON.stringify(t) === before, 'headToHead: pure (no mutation)');
+  for (const s of finalSt) {
+    let netSum = 0, facedSum = 0;
+    for (const o of t.players) { const rec = h2h[s.player.id][o.id]; if (rec) { netSum += rec.net; facedSum += rec.faced; } }
+    // each match contributes to 2 opponents -> sums are doubled vs the player's own totals
+    ok(netSum === 2 * s.diff, `h2h: Σnet = 2·diff for ${s.player.name} (${netSum} vs ${2 * s.diff})`);
+    ok(facedSum === 2 * s.played, `h2h: Σfaced = 2·played for ${s.player.name} (${facedSum} vs ${2 * s.played})`);
+  }
+  // symmetry / mirroring between every ordered pair
+  for (const a of t.players) for (const b of t.players) {
+    if (a.id === b.id) continue;
+    const ab = h2h[a.id][b.id], ba = h2h[b.id][a.id];
+    ok((ab ? ab.faced : 0) === (ba ? ba.faced : 0), `h2h: faced symmetric ${a.name}/${b.name}`);
+    ok((ab ? ab.net : 0) === -(ba ? ba.net : 0), `h2h: net antisymmetric ${a.name}/${b.name}`);
+    ok((ab ? ab.wins : 0) === (ba ? ba.losses : 0), `h2h: wins mirror losses ${a.name}/${b.name}`);
+    ok((ab ? ab.draws : 0) === (ba ? ba.draws : 0), `h2h: draws symmetric ${a.name}/${b.name}`);
+  }
+}
+
 // ------------------------------------------------------------------- guards
 console.log('== Creation guards ==');
 {
