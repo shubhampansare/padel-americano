@@ -1187,7 +1187,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v20 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v21 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -2369,7 +2369,6 @@ function openReplaySheet(entry) {
   const st = Engine.standings(snap);
   const maxPts = Math.max(1, ...st.map(s => s.points));
   const hasRests = snap.rounds.some(r => r.resting && r.resting.length);
-  const nm = pid => esc(Engine.playerName(snap, pid));
   const playedRounds = snap.rounds.filter(r => Engine.anyScores(r));
 
   const ov = sheet(`
@@ -2398,10 +2397,21 @@ function openReplaySheet(entry) {
 
     ${scoreViewsHTML(snap)}
 
+    ${roundByRoundHTML(snap)}`);
+  ov.querySelector('#rp-back').addEventListener('click', openHistorySheet);
+}
+
+/* Round-by-round score list — used on the results screen and in replays.
+   Read-only; shows only rounds that were actually scored. */
+function roundByRoundHTML(t) {
+  const nm = pid => esc(Engine.playerName(t, pid));
+  const playedRounds = t.rounds.filter(r => Engine.anyScores(r));
+  if (playedRounds.length === 0) return '';
+  return `
     <div class="field-label" style="margin-top:18px">Round by round</div>
     <div class="replay-rounds">
-      ${playedRounds.length === 0 ? '<div class="sub">No rounds were scored.</div>' : playedRounds.map(r => {
-        const ri = snap.rounds.indexOf(r);
+      ${playedRounds.map(r => {
+        const ri = t.rounds.indexOf(r);
         return `
         <div class="replay-round">
           <div class="rr-head">Round ${ri + 1}</div>
@@ -2418,8 +2428,7 @@ function openReplaySheet(entry) {
           ${r.resting && r.resting.length ? `<div class="rr-rest">Sitting out: ${r.resting.map(nm).join(', ')}</div>` : ''}
         </div>`;
       }).join('')}
-    </div>`);
-  ov.querySelector('#rp-back').addEventListener('click', openHistorySheet);
+    </div>`;
 }
 
 /* ---------------- score views (bump chart · highlights · head-to-head) ---------------- */
@@ -2630,6 +2639,7 @@ function renderResults() {
         </tbody>
       </table>
       ${scoreViewsHTML(T)}
+      ${roundByRoundHTML(T)}
       <div class="round-actions" style="margin-top:24px">
         <button class="btn btn-primary btn-block" id="res-share">📋 Copy results</button>
         <button class="btn btn-ghost btn-block" id="res-new">Start a new tournament</button>
