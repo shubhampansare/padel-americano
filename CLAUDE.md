@@ -45,11 +45,29 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
 - Mexicano: rounds drawn lazily (pairings depend on live standings: 1st+4th vs 2nd+3rd per
   court); skill badges have no role in Mexicano.
 - Sit-out compensation modes: none | half (fixed N/2) | avg (player's own pts/game,
-  recomputed live; legacy `restPoints > 0` config means 'half').
+  recomputed live; legacy `restPoints > 0` config means 'half'). In games mode (below)
+  the 'half' base is `gamesTarget/2`, not `pointsPerMatch/2`.
 - Rests count only up to the round being played (first incomplete) — provisional
   future rounds' rests must never show in standings or earn compensation (v17 fix).
   Draw fairness uses `historyCounts` (all drawn rounds, score-independent) — distinct
   from `standings` rests by design.
+- Scoring modes: `scoring: 'rally' | 'games'` (default 'rally'; absent = rally, so old
+  tournaments stay valid). Games mode (v20) stores **games won** in the same
+  `scoreA`/`scoreB` fields, so `standings` sums them as "points" with no other math
+  change; `setScore` enforces strict first-to-N (winner exactly N, loser below). Both
+  formats; Mexicano games draws are coarser early (game-total ties) by design. UI wording
+  switches points↔games via the `scoreUnit`/`matchGoalText`/`restHalfOf` helpers.
+- `mutate(fn)` returns `true`/`false` (success) so the score sheet can stay open when a
+  score is rejected — don't reintroduce an unconditional `closeScoreSheet()` after save.
+
+## Shipped score-view & replay analytics (v18–v19)
+- Past tournaments are archived as **full snapshots** (`store.archive` stores `snapshot`,
+  de-duped by tournament `id`) and replayed read-only (`openReplaySheet`) — standings +
+  round-by-round, never touching the live tournament. Legacy summary-only entries still
+  list but aren't replayable.
+- Score views (`scoreViewsHTML`) on the results screen and in replays: `Engine.progression`
+  (rank/points timeline → bump chart), `Engine.headToHead` (opponent net matrix), and
+  stat highlights. Both engine fns are pure and test-covered.
 
 ## Parked / backlog
 
@@ -57,16 +75,3 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   (1+3 vs 2+4 etc.), manual round-1 seeding, fixed-partner mode, mixed-gender flag.
 - Other ideas from competitor research (docs/competitor-research.md): read-only spectator
   link, playoff/final from standings, PDF/CSV export, long-term cross-session rankings.
-- Open past tournaments: list the last ~5 saved tournaments (not just the most recent
-  name) and let the user open one to view its final standings, round-by-round scores, and
-  whatever else was stored. Read-only replay of a completed event.
-- Interesting score views: add visual takes on the results beyond the flat standings table.
-  Headline idea — a rank-timeline / bump chart showing how each player moved up or down
-  round by round (the "shocked at the final standings" moment is more fun as a story). Open
-  to other forms (momentum, biggest climbers, head-to-head).
-- First-to-N-games scoring mode: rounds played as mini-sets with normal 15/30/40 scoring
-  (golden point), first to N games (typically 4) wins; leaderboard counts games won, not
-  rally points. Best fit for Americano; coarse for Mexicano (0–4/round → heavy ties make
-  standings-based draws semi-arbitrary early, needs tiebreak handling). Free score entry
-  already approximates it today (enter 4–2 as the match score); a first-class mode adds a
-  setup preset + tiebreakers.
