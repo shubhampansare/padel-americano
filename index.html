@@ -395,8 +395,26 @@ body.sheet-lock { position: fixed; left: 0; right: 0; overflow: hidden; }
 
 /* history list */
 .hist-item { background: var(--bg1); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; }
-.hist-item .ht { font-weight: 700; }
+.hist-item.tappable { cursor: pointer; transition: border-color .15s, background .15s; }
+.hist-item.tappable:active { background: var(--bg2); border-color: var(--steel-hi); }
+.hist-item .ht { font-weight: 700; position: relative; padding-right: 18px; }
+.hist-item .ht .hchev { position: absolute; right: 0; top: 50%; transform: translateY(-50%); color: var(--txt-faint); font-size: 1.4rem; font-weight: 400; line-height: 1; }
 .hist-item .hs { color: var(--txt-dim); font-size: .84rem; margin-top: 3px; line-height: 1.5; }
+
+/* read-only replay */
+.replay-back { display: inline-flex; align-items: center; font-family: var(--body); font-weight: 600; font-size: .9rem; color: var(--txt-dim); padding: 4px 0; margin-bottom: 8px; }
+.replay-back:active { color: var(--lime); }
+.replay-rounds { margin-top: 6px; }
+.replay-round { background: var(--bg1); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.replay-round .rr-head { font-family: var(--disp); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; color: var(--txt-faint); margin-bottom: 6px; }
+.rr-match { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--bg2); }
+.rr-match:first-of-type { border-top: none; }
+.rr-team { font-size: .86rem; font-weight: 600; color: var(--txt-dim); line-height: 1.3; }
+.rr-team.right { text-align: right; }
+.rr-team.w { color: var(--txt); }
+.rr-score { font-family: var(--disp); font-weight: 800; font-size: 1.05rem; color: var(--lime); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rr-score .d { color: var(--txt-faint); margin: 0 2px; font-weight: 400; }
+.rr-rest { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--bg2); font-size: .78rem; color: var(--amber); }
 
 /* toast */
 #toast {
@@ -1046,15 +1064,20 @@ const store = {
     try { return JSON.parse(localStorage.getItem(LS.HISTORY)) || []; } catch { return []; }
   },
   archive(t) {
-    const h = store.history();
+    // Replace any prior archive of this same tournament (re-finishing a reopened
+    // session) so the replay list never fills with duplicates.
+    const h = store.history().filter(x => x.id !== t.id);
     const st = Engine.standings(t);
     h.unshift({
+      id: t.id,
       date: new Date(t.createdAt || Date.now()).toISOString().slice(0, 10),
       name: t.config.name,
       format: t.config.format,
       players: t.players.length,
       podium: st.slice(0, 3).map(s => `${s.player.name} (${Math.round(s.points)})`),
       full: st.map(s => `${s.player.name} ${Math.round(s.points)}pts ${s.wins}W`),
+      // Full frozen state for read-only replay (standings + every round).
+      snapshot: JSON.parse(JSON.stringify(t)),
     });
     localStorage.setItem(LS.HISTORY, JSON.stringify(h.slice(0, 20)));
   },
@@ -1078,7 +1101,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v17 · 12 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v18 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -2184,15 +2207,79 @@ function closeTvMode() {
 
 function openHistorySheet() {
   const h = store.history();
-  sheet(`
+  const ov = sheet(`
     <div class="grab"></div>
     <h3>Past tournaments</h3>
-    ${h.length === 0 ? '<div class="sub">Nothing here yet.</div>' : ''}
-    ${h.map(x => `
-      <div class="hist-item">
-        <div class="ht">${esc(x.date)} — ${esc(x.name)} <span style="color:var(--txt-faint)">(${x.players} players, ${esc(x.format)})</span></div>
+    ${h.length === 0
+      ? '<div class="sub">Nothing here yet. Finish a tournament and it lands here — tap any one later to replay its standings and every round.</div>'
+      : '<div class="sub">Tap a tournament to replay its final standings and round-by-round scores.</div>'}
+    ${h.map((x, i) => `
+      <div class="hist-item${x.snapshot ? ' tappable' : ''}" ${x.snapshot ? `data-replay="${i}"` : ''}>
+        <div class="ht">${esc(x.date)} — ${esc(x.name)} <span style="color:var(--txt-faint)">(${x.players} players, ${esc(x.format)})</span>${x.snapshot ? '<span class="hchev">›</span>' : ''}</div>
         <div class="hs">${x.podium.map((p, i) => ['🥇', '🥈', '🥉'][i] + ' ' + esc(p)).join(' · ')}</div>
       </div>`).join('')}`);
+  ov.querySelectorAll('[data-replay]').forEach(el => el.addEventListener('click', () => {
+    openReplaySheet(store.history()[+el.dataset.replay]);
+  }));
+}
+
+/* Read-only replay of a finished, archived tournament. Operates purely on the
+   stored snapshot — never touches the live tournament or localStorage. */
+function openReplaySheet(entry) {
+  if (!entry || !entry.snapshot) { toast('No replay saved for this one', true); return; }
+  const snap = entry.snapshot;
+  const st = Engine.standings(snap);
+  const maxPts = Math.max(1, ...st.map(s => s.points));
+  const hasRests = snap.rounds.some(r => r.resting && r.resting.length);
+  const nm = pid => esc(Engine.playerName(snap, pid));
+  const playedRounds = snap.rounds.filter(r => Engine.anyScores(r));
+
+  const ov = sheet(`
+    <div class="grab"></div>
+    <button class="replay-back" id="rp-back">‹ Past tournaments</button>
+    <h3>${esc(entry.name)}</h3>
+    <div class="sub">${esc(entry.date)} · ${snap.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${playedRounds.length} round${playedRounds.length === 1 ? '' : 's'} played · read-only replay</div>
+
+    <div class="field-label">Final standings</div>
+    <table class="stand-table">
+      <thead><tr><th></th><th>Player</th><th>Pts</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
+      <tbody>
+        ${st.map((s, i) => `
+          <tr class="top${i + 1}">
+            <td class="rank">${i + 1}</td>
+            <td class="pname">${esc(s.player.name)}${s.player.active ? '' : ' <span class="out">(left)</span>'}
+              <div class="ptbar"><i style="width:${Math.round(100 * s.points / maxPts)}%"></i></div>
+            </td>
+            <td class="pts">${Math.round(s.points)}</td>
+            <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
+            <td style="color:var(--txt-dim)">${s.wins}·${s.draws}·${s.losses}</td>
+            ${hasRests ? `<td style="color:var(--txt-faint)">${s.rests}</td>` : ''}
+          </tr>`).join('')}
+      </tbody>
+    </table>
+
+    <div class="field-label" style="margin-top:18px">Round by round</div>
+    <div class="replay-rounds">
+      ${playedRounds.length === 0 ? '<div class="sub">No rounds were scored.</div>' : playedRounds.map(r => {
+        const ri = snap.rounds.indexOf(r);
+        return `
+        <div class="replay-round">
+          <div class="rr-head">Round ${ri + 1}</div>
+          ${r.matches.map(m => {
+            const scored = m.scoreA !== null && m.scoreB !== null;
+            const aWin = scored && m.scoreA > m.scoreB, bWin = scored && m.scoreB > m.scoreA;
+            return `
+            <div class="rr-match">
+              <span class="rr-team ${aWin ? 'w' : ''}">${nm(m.teamA[0])} &amp; ${nm(m.teamA[1])}</span>
+              <span class="rr-score">${scored ? `${m.scoreA}<span class="d">–</span>${m.scoreB}` : '<span class="d">—</span>'}</span>
+              <span class="rr-team right ${bWin ? 'w' : ''}">${nm(m.teamB[0])} &amp; ${nm(m.teamB[1])}</span>
+            </div>`;
+          }).join('')}
+          ${r.resting && r.resting.length ? `<div class="rr-rest">Sitting out: ${r.resting.map(nm).join(', ')}</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>`);
+  ov.querySelector('#rp-back').addEventListener('click', openHistorySheet);
 }
 
 function copyStandings() {
