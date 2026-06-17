@@ -270,6 +270,26 @@ input, select { font-family: inherit; }
   background: var(--lime-glow); border: 1px solid rgba(205,245,69,.3); color: var(--txt);
 }
 .banner b { color: var(--lime); }
+.banner.gate { background: rgba(245,185,69,.1); border-color: rgba(245,185,69,.4); }
+.banner.gate b { color: var(--amber); }
+
+/* readiness check-in rows (late-arrivals) */
+.ck-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: var(--bg1); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px; margin-bottom: 8px; color: var(--txt); font-size: 1rem; cursor: pointer;
+  transition: background .15s, border-color .15s; animation: fadein .2s ease;
+}
+.ck-row.on { background: var(--lime-glow); border-color: rgba(205,245,69,.45); }
+.ck-box {
+  flex: 0 0 24px; width: 24px; height: 24px; border-radius: 7px;
+  border: 2px solid var(--steel-hi); display: flex; align-items: center; justify-content: center;
+  color: #15200a; font-weight: 800; font-size: .9rem;
+}
+.ck-row.on .ck-box { background: var(--lime); border-color: var(--lime); }
+.ck-name { flex: 1; min-width: 0; font-weight: 600; }
+.ck-tag { font-size: .72rem; color: var(--txt-faint); text-transform: uppercase; letter-spacing: .04em; }
+.ck-row.on .ck-tag { color: var(--lime); }
 
 /* ============ standings ============ */
 .stand-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
@@ -617,20 +637,22 @@ const Engine = (() => {
       name: 'Americano',
     }, config || {});
 
-    // players: array of strings, or {name, skill} objects when skill levels are used
+    // players: array of strings, or {name, skill} objects when skill levels are used.
+    // `arrived: false` marks a late-arriving player who is on the roster but not yet
+    // checked in — kept off every draw and out of standings until they tick in.
     const roster = (config && config.players || [])
       .map(p => (p && typeof p === 'object')
-        ? { name: String(p.name || '').trim(), skill: clampSkill(p.skill) }
-        : { name: String(p).trim(), skill: 2 })
+        ? { name: String(p.name || '').trim(), skill: clampSkill(p.skill), arrived: p.arrived !== false }
+        : { name: String(p).trim(), skill: 2, arrived: true })
       .filter(p => p.name);
-    if (roster.length < 4) throw new Error('Need at least 4 players');
+    if (roster.filter(p => p.arrived).length < 4) throw new Error('Need at least 4 players');
     if (cfg.pointsPerMatch < 2) throw new Error('Points per match must be at least 2');
 
     const t = {
       id: 't' + Date.now().toString(36),
       createdAt: config && config.createdAt || null,
       config: cfg,
-      players: roster.map(p => ({ id: uid(), name: p.name, active: true, skill: p.skill })),
+      players: roster.map(p => ({ id: uid(), name: p.name, active: p.arrived, arrived: p.arrived, skill: p.skill })),
       rounds: [],
       finished: false,
     };
@@ -640,6 +662,13 @@ const Engine = (() => {
   // ---------- derived state ----------
 
   function activePlayers(t) { return t.players.filter(p => p.active); }
+
+  // Late-arrivals: a "pending" player is on the roster but not yet checked in
+  // (arrived === false). While any pending player exists, the schedule is capped
+  // at PARTIAL_ROUND_CAP rounds — everyone must check in or be removed to go further.
+  const PARTIAL_ROUND_CAP = 2;
+  function pendingPlayers(t) { return t.players.filter(p => p.arrived === false); }
+  function roundCap(t) { return pendingPlayers(t).length ? PARTIAL_ROUND_CAP : Infinity; }
 
   function courtsUsed(t) {
     const n = activePlayers(t).length;
@@ -833,6 +862,9 @@ const Engine = (() => {
   function generateRound(t, rng) {
     rng = rng || defaultRng;
     if (activePlayers(t).length < 4) throw new Error('Need at least 4 active players');
+    if (t.rounds.length >= PARTIAL_ROUND_CAP && pendingPlayers(t).length) {
+      throw new Error('Check everyone in or remove no-shows before round ' + (PARTIAL_ROUND_CAP + 1));
+    }
 
     const resting = pickResters(t, rng);
     const restSet = new Set(resting);
@@ -856,7 +888,8 @@ const Engine = (() => {
   /** Americano: draw every planned round upfront (rounds beyond the current are provisional). */
   function refillPlanned(t, rng) {
     if (t.config.format !== 'americano') return;
-    while (t.rounds.length < t.config.plannedRounds && activePlayers(t).length >= 4) {
+    const cap = Math.min(t.config.plannedRounds, roundCap(t));
+    while (t.rounds.length < cap && activePlayers(t).length >= 4) {
       generateRound(t, rng);
     }
   }
@@ -940,6 +973,7 @@ const Engine = (() => {
   function standings(t) {
     const stats = {};
     for (const p of t.players) {
+      if (p.arrived === false) continue; // not yet checked in — no row until they play
       stats[p.id] = { player: p, points: 0, played: 0, wins: 0, draws: 0, losses: 0, pf: 0, pa: 0, diff: 0, rests: 0 };
     }
     // Rests only count up to the round being played — Americano pre-draws the
@@ -1083,6 +1117,24 @@ const Engine = (() => {
     redrawFuture(t, rng);
   }
 
+  /** Check a late-arriving player in: they join the draw from the next redraw. */
+  function markArrived(t, pid, rng) {
+    const p = t.players.find(x => x.id === pid);
+    if (!p) throw new Error('No such player');
+    p.arrived = true;
+    p.active = true;
+    redrawFuture(t, rng);
+  }
+
+  /** Drop a no-show who never checked in: hard-removed from the roster entirely. */
+  function removeNoShow(t, pid, rng) {
+    const i = t.players.findIndex(x => x.id === pid);
+    if (i === -1) throw new Error('No such player');
+    if (t.players[i].arrived !== false) throw new Error('Only un-arrived players can be removed as no-shows');
+    t.players.splice(i, 1);
+    redrawFuture(t, rng);
+  }
+
   function renamePlayer(t, pid, name) {
     name = String(name).trim();
     if (!name) throw new Error('Name required');
@@ -1112,6 +1164,7 @@ const Engine = (() => {
     createTournament, generateRound, regenerateRound, refillPlanned, redrawFuture,
     setPlannedRounds, setScore, clearScore,
     roundComplete, standings, progression, headToHead, addPlayer, removePlayer, reactivatePlayer,
+    markArrived, removeNoShow, pendingPlayers, PARTIAL_ROUND_CAP,
     renamePlayer, setCourts, setSkill, activePlayers,
     courtsUsed, historyCounts, playerName, anyScores,
   };
@@ -1181,13 +1234,14 @@ function currentRoundIdx(t) {
 let viewRound = T ? currentRoundIdx(T) : 0;
 let scoreCtx = null;                   // {r, m, a, b} while score sheet open
 let setupState = null;                 // setup form state
+let checkin = null;                    // {roster,ready[]} while the readiness check-in screen is open
 let timerInterval = null;
 
 const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v21 · 13 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v22 · 17 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1308,7 +1362,7 @@ function renderSetup() {
       </div>
 
       <div class="setup-players">
-      <div class="field-label">Players <span class="hint">${filled} entered ${filled >= 4 ? '' : '(need 4+)'}</span></div>
+      <div class="field-label">Players <span class="hint">${filled} entered ${filled >= s.courts * 4 ? '' : `(need ${s.courts * 4} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}</span></div>
       ${s.format === 'americano' ? `
       <div class="seg" id="seg-skillmode" style="margin-bottom:10px">
         <button data-v="0" class="${!s.useSkills ? 'on' : ''}">No skill levels</button>
@@ -1403,7 +1457,7 @@ function renderSetup() {
 
       <div class="setup-footer">
       <div style="margin-top:28px">
-        <button class="btn btn-primary btn-block" id="start-btn" ${filled >= 4 ? '' : 'disabled'} style="font-size:1.25rem;padding:18px">Start tournament</button>
+        <button class="btn btn-primary btn-block" id="start-btn" ${filled >= s.courts * 4 ? '' : 'disabled'} style="font-size:1.25rem;padding:18px">Start tournament</button>
       </div>
       ${store.history().length ? '<button class="btn btn-ghost btn-block" id="show-history" style="margin-top:10px">Past tournaments</button>' : ''}
       <button class="btn btn-ghost btn-block" id="setup-help" style="margin-top:10px">Rules &amp; help</button>
@@ -1479,7 +1533,7 @@ function renderSetup() {
     });
     cp.addEventListener('blur', () => renderSetup());
   }
-  $('#start-btn').addEventListener('click', e => busy(e.currentTarget, 'Drawing round 1…', startTournament));
+  $('#start-btn').addEventListener('click', openCheckin);
   const sh = $('#show-history');
   if (sh) sh.addEventListener('click', () => openHistorySheet());
   $('#setup-help').addEventListener('click', openHelpSheet);
@@ -1494,21 +1548,78 @@ function renderSetup() {
   }
   function updateSetupMeta() {
     const f = s.players.filter(n => n.trim()).length;
-    $('#start-btn').toggleAttribute('disabled', f < 4);
+    const need = s.courts * 4;
+    $('#start-btn').toggleAttribute('disabled', f < need);
     const hint = app.querySelector('.field-label .hint');
-    if (hint) hint.textContent = `${f} entered ${f >= 4 ? '' : '(need 4+)'}`;
+    if (hint) hint.textContent = `${f} entered ${f >= need ? '' : `(need ${need} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}`;
   }
 }
 
-function startTournament() {
+/* ---------------- readiness check-in (late arrivals) ---------------- */
+
+// Pressing "Start tournament" routes here: tick who's here, start when courts can be
+// filled (courts×4). Anyone left un-ticked is a late arrival — on the roster but
+// pending, joining the draw once checked in (see openReadinessSheet during play).
+function openCheckin() {
   const s = setupState;
   const roster = s.players.map((n, i) => ({ name: n.trim(), skill: s.skills[i] || 2 })).filter(r => r.name);
-  const names = roster.map(r => r.name);
-  const lower = names.map(n => n.toLowerCase());
+  const lower = roster.map(r => r.name.toLowerCase());
   if (new Set(lower).size !== lower.length) { toast('Player names must be unique', true); return; }
-  mutate(() => {
+  const need = s.courts * 4;
+  if (roster.length < need) { toast(`Need ${need} players for ${s.courts} court${s.courts > 1 ? 's' : ''}`, true); return; }
+  checkin = { roster, ready: roster.map(() => false) };
+  render();
+}
+
+function renderReadiness() {
+  const s = setupState, c = checkin;
+  const need = s.courts * 4;
+  const readyCount = c.ready.filter(Boolean).length;
+  const allReady = readyCount === c.roster.length;
+  const canStart = readyCount >= need;
+  app.innerHTML = `
+  <div class="screen">
+    <div class="setup-hero">
+      <div class="brand">Who's <em>ready?</em></div>
+      <div class="tagline">Tick everyone who's here. Start once ${need} are in — latecomers join from round 2.</div>
+    </div>
+    <div class="setup-body">
+      <div class="seg" id="ck-all" style="margin-bottom:12px">
+        <button data-all="1" class="${allReady ? 'on lime' : ''}">${allReady ? '✓ Everyone here' : 'Select all'}</button>
+        <button data-all="0" class="${readyCount === 0 ? 'on' : ''}">Clear</button>
+      </div>
+      <div id="ck-list">
+        ${c.roster.map((r, i) => `
+          <button class="ck-row ${c.ready[i] ? 'on' : ''}" data-ck="${i}">
+            <span class="ck-box">${c.ready[i] ? '✓' : ''}</span>
+            <span class="ck-name">${esc(r.name)}</span>
+            <span class="ck-tag">${c.ready[i] ? 'here' : 'not yet'}</span>
+          </button>`).join('')}
+      </div>
+      <div class="setup-footer">
+        <div class="setup-note" style="text-align:center;margin:14px 0">${readyCount} of ${c.roster.length} ready · ${canStart ? 'ready to start ✓' : `need ${need - readyCount} more`}</div>
+        <button class="btn btn-primary btn-block" id="ck-start" ${canStart ? '' : 'disabled'} style="font-size:1.25rem;padding:18px">Start round 1${allReady ? '' : ` with ${readyCount}`}</button>
+        <button class="btn btn-ghost btn-block" id="ck-back" style="margin-top:10px">‹ Back to setup</button>
+      </div>
+    </div>
+  </div>`;
+  app.querySelectorAll('[data-ck]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.ck; c.ready[i] = !c.ready[i]; renderReadiness();
+  }));
+  app.querySelector('[data-all="1"]').addEventListener('click', () => { c.ready = c.roster.map(() => true); renderReadiness(); });
+  app.querySelector('[data-all="0"]').addEventListener('click', () => { c.ready = c.roster.map(() => false); renderReadiness(); });
+  app.querySelector('#ck-back').addEventListener('click', () => { checkin = null; render(); });
+  const sb = app.querySelector('#ck-start');
+  sb.addEventListener('click', e => busy(e.currentTarget, 'Drawing round 1…', commitCheckin));
+}
+
+function commitCheckin() {
+  const s = setupState, c = checkin;
+  const players = c.roster.map((r, i) => ({ name: r.name, skill: r.skill, arrived: c.ready[i] }));
+  const names = c.roster.map(r => r.name);
+  const ok = mutate(() => {
     T = Engine.createTournament({
-      players: s.format === 'americano' && s.useSkills ? roster : names,
+      players,
       useSkills: s.format === 'americano' && s.useSkills,
       restMode: s.restMode,
       courts: s.courts,
@@ -1523,12 +1634,14 @@ function startTournament() {
       createdAt: Date.now(),
     });
     T.config.durationMin = s.durationMin;
-    if (T.config.format === 'americano') Engine.refillPlanned(T); // full schedule upfront, future rounds provisional
+    if (T.config.format === 'americano') Engine.refillPlanned(T); // schedule upfront (capped at 2 while anyone is pending)
     else Engine.generateRound(T);                                  // mexicano: each round needs the previous scores
-    store.saveLastPlayers(names, Object.fromEntries(roster.map(r => [r.name.toLowerCase(), r.skill])), s.useSkills);
+    store.saveLastPlayers(names, Object.fromEntries(c.roster.map(r => [r.name.toLowerCase(), r.skill])), s.useSkills);
+    checkin = null;
     tab = 'rounds';
     viewRound = 0;
   });
+  if (!ok) { T = null; } // creation failed — stay on the check-in screen
 }
 
 /* ---------------- play: header & tabs ---------------- */
@@ -1630,6 +1743,11 @@ function renderRoundsTab() {
   const canRegen = !Engine.anyScores(r) &&
     T.rounds.slice(viewRound + 1).every(x => !Engine.anyScores(x)) &&
     (isAmericano || isLast);
+  // late-arrivals: while anyone is pending the schedule is capped at PARTIAL_ROUND_CAP.
+  // Past the cap, the next round is blocked until everyone checks in or is removed.
+  const pend = Engine.pendingPlayers(T);
+  const blockedByPending = pend.length > 0 && isLast && complete &&
+    T.rounds.length >= Engine.PARTIAL_ROUND_CAP && T.rounds.length < planned;
 
   const dots = [];
   const total = Math.max(planned, T.rounds.length);
@@ -1693,8 +1811,16 @@ function renderRoundsTab() {
     ${allPlannedDone ? `
     <div class="banner"><b>All ${T.rounds.length} rounds played!</b> Finish the tournament to crown the winner — or squeeze in another round.</div>` : ''}
 
+    ${pend.length ? `
+    <div class="banner ${blockedByPending ? 'gate' : ''}">
+      ${blockedByPending
+        ? `<b>Round ${T.rounds.length + 1} needs the full group.</b> ${pend.length} ${pend.length > 1 ? 'players have' : 'player has'} not checked in — check them in or remove no-shows to continue.`
+        : `<b>${pend.length} ${pend.length > 1 ? 'players' : 'player'} not here yet.</b> Check them in as they arrive — they join from the next round.`}
+    </div>` : ''}
+
     <div class="round-actions">
-      ${!isAmericano && isLast && complete && !allPlannedDone ? `<button class="btn btn-primary btn-block" id="next-round-btn" style="font-size:1.2rem;padding:16px">Draw round ${T.rounds.length + 1} →</button>` : ''}
+      ${pend.length ? `<button class="btn ${blockedByPending ? 'btn-primary' : 'btn-ghost'} btn-block" id="readiness-btn" ${blockedByPending ? 'style="font-size:1.2rem;padding:16px"' : ''}>${blockedByPending ? `✋ Check players in for round ${T.rounds.length + 1}` : '🕒 Manage arrivals'}</button>` : ''}
+      ${!isAmericano && isLast && complete && !allPlannedDone && !blockedByPending ? `<button class="btn btn-primary btn-block" id="next-round-btn" style="font-size:1.2rem;padding:16px">Draw round ${T.rounds.length + 1} →</button>` : ''}
       ${allPlannedDone ? `
         <button class="btn btn-primary btn-block" id="finish-btn" style="font-size:1.2rem;padding:16px">🏆 Finish &amp; crown winner</button>
         <button class="btn btn-ghost btn-block" id="extra-round-btn">+ One more round</button>` : ''}
@@ -1718,9 +1844,14 @@ function renderRoundsTab() {
       else { T.config.plannedRounds = T.rounds.length + 1; Engine.generateRound(T); }
       viewRound = T.rounds.length - 1;
     })));
+  const rdb = $('#readiness-btn');
+  if (rdb) rdb.addEventListener('click', () => openReadinessSheet({ gate: blockedByPending }));
   const rb = $('#regen-btn');
-  if (rb) rb.addEventListener('click', () => busy(rb, 'Re-drawing…', () =>
-    mutate(() => { Engine.regenerateRound(T, viewRound); })));
+  if (rb) rb.addEventListener('click', () => {
+    // in partial mode, confirm who's arrived before re-drawing so latecomers land in the new draw
+    if (Engine.pendingPlayers(T).length) { openReadinessSheet({ redrawIdx: viewRound }); return; }
+    busy(rb, 'Re-drawing…', () => mutate(() => { Engine.regenerateRound(T, viewRound); }));
+  });
   const fb = $('#finish-btn');
   if (fb) fb.addEventListener('click', finishTournament);
   $('#share-draws').addEventListener('click', copyRoundDraws);
@@ -2165,6 +2296,81 @@ function openPlayersSheet(editPid) {
     toast(name + ' joins from the next draw');
     openPlayersSheet();
   });
+}
+
+/**
+ * Readiness sheet — check late arrivals in (or remove no-shows). Three uses:
+ *  - manage: tick people in any time during the first rounds (they redraw into the next round)
+ *  - gate:   mandatory before the round past PARTIAL_ROUND_CAP — everyone must be in or removed
+ *  - redraw: pass a round index to re-draw that round after confirming who's arrived
+ */
+function openReadinessSheet(opts) {
+  opts = opts || {};
+  const pend = Engine.pendingPlayers(T);
+  const arrivedN = Engine.activePlayers(T).length;
+  const isRedraw = typeof opts.redrawIdx === 'number';
+  // gate = caller reached the partial-round cap (mandatory before the next round). Passed in
+  // explicitly so the label/behaviour survive the last check-in (which refills the schedule).
+  const gate = !isRedraw && !!opts.gate;
+  const nextRoundNo = Engine.PARTIAL_ROUND_CAP + 1; // a partial roster always stalls before round 3
+  const ov = sheet(`
+    <div class="grab"></div>
+    <h3>${pend.length ? 'Who has arrived?' : 'Everyone is here'}</h3>
+    <div class="sub">${isRedraw
+      ? 'Check in anyone who arrived, then re-draw the round to include them.'
+      : gate
+        ? (pend.length
+          ? `Round ${nextRoundNo} needs the full group — check everyone in, or remove no-shows.`
+          : `Everyone's in — continue to round ${nextRoundNo}.`)
+        : 'Tick players in as they arrive — they join the draw from the next round.'}</div>
+    <div class="proster">
+      ${pend.length ? pend.map(p => `
+        <div class="player-row">
+          <span class="pnum">🕒</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(p.name)}</div>
+            <div class="pstat">not checked in</div>
+          </div>
+          <button class="del" data-here="${p.id}" style="color:var(--lime);font-size:.9rem;width:auto;padding:0 12px">✓ here</button>
+          <button class="del" data-noshow="${p.id}" title="Remove no-show">✕</button>
+        </div>`).join('') : '<div class="setup-note">Everyone entered has checked in.</div>'}
+    </div>
+    <div class="setup-note" style="margin-top:10px">${arrivedN} checked in${pend.length ? ` · ${pend.length} waiting` : ''}</div>
+    <div class="sheet-actions">
+      ${isRedraw
+        ? `<button class="btn btn-primary" id="rd-go" style="flex:2">⟲ Re-draw round ${opts.redrawIdx + 1}</button>`
+        : gate
+          ? `<button class="btn btn-primary" id="rd-continue" style="flex:2" ${pend.length ? 'disabled' : ''}>Continue to round ${nextRoundNo}</button>`
+          : `<button class="btn btn-primary" id="rd-done" style="flex:2">Done</button>`}
+    </div>`);
+  ov.querySelectorAll('[data-here]').forEach(b => b.addEventListener('click', () => {
+    const p = T.players.find(x => x.id === b.dataset.here);
+    if (mutate(() => Engine.markArrived(T, p.id))) toast(p.name + ' checked in');
+    openReadinessSheet(opts);
+  }));
+  ov.querySelectorAll('[data-noshow]').forEach(b => b.addEventListener('click', () => {
+    const p = T.players.find(x => x.id === b.dataset.noshow);
+    confirmSheet(`Remove ${p.name}?`, 'They never checked in — this removes them from the tournament entirely.', 'Remove', () => {
+      mutate(() => Engine.removeNoShow(T, p.id));
+      openReadinessSheet(opts);
+    });
+  }));
+  const go = ov.querySelector('#rd-go');
+  if (go) go.addEventListener('click', () => { closeSheet(); mutate(() => { Engine.regenerateRound(T, opts.redrawIdx); viewRound = opts.redrawIdx; }); });
+  const advance = () => {
+    closeSheet();
+    // Mexicano draws lazily — draw the now-unblocked round; Americano already refilled on check-in
+    if (T.config.format === 'mexicano' && T.rounds.every((_, i) => Engine.roundComplete(T, i)) && T.rounds.length < T.config.plannedRounds) {
+      mutate(() => { Engine.generateRound(T); viewRound = T.rounds.length - 1; });
+    } else {
+      viewRound = currentRoundIdx(T);
+      render();
+    }
+  };
+  const cont = ov.querySelector('#rd-continue');
+  if (cont) cont.addEventListener('click', advance);
+  const done = ov.querySelector('#rd-done');
+  if (done) done.addEventListener('click', advance);
 }
 
 function openSettingsSheet() {
@@ -2660,7 +2866,9 @@ function renderResults() {
 
 function render() {
   closeSheet();
-  if (!T) {
+  if (checkin) {
+    renderReadiness();
+  } else if (!T) {
     if (!setupState) setupState = defaultSetup();
     renderSetup();
   } else {

@@ -59,6 +59,17 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   switches points↔games via the `scoreUnit`/`matchGoalText`/`restHalfOf` helpers.
 - `mutate(fn)` returns `true`/`false` (success) so the score sheet can stay open when a
   score is rejected — don't reintroduce an unconditional `closeScoreSheet()` after save.
+- Readiness / late arrivals (v22): players carry an `arrived` flag (absent/legacy ⇒ true).
+  A "pending" player (`arrived:false`, `active:false`) is on the roster but not yet checked
+  in — excluded from `activePlayers`, every draw, and `standings` (which skips `arrived===false`)
+  until they tick in. Start routes through a "Who's ready?" check-in (`renderReadiness`);
+  Start needs `courts×4` ticked (the setup Start gate also requires `entered ≥ courts×4`).
+  While any player is pending the schedule is **capped at `PARTIAL_ROUND_CAP` (2) rounds**
+  (`refillPlanned`/`generateRound` honor `roundCap`); reaching round 3 throws until everyone
+  checks in (`markArrived`) or is removed (`removeNoShow`, hard-deletes the never-drawn player —
+  distinct from `removePlayer`'s soft "(left)"). The in-play readiness sheet (`openReadinessSheet`)
+  takes `{gate}` from `blockedByPending` so the gate's "Continue" label survives the last
+  check-in (after which Americano refills to planned). Full-ready start ⇒ zero new prompts.
 
 ## Shipped score-view & replay analytics (v18–v19)
 - Past tournaments are archived as **full snapshots** (`store.archive` stores `snapshot`,
