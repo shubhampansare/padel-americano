@@ -68,8 +68,13 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   (`refillPlanned`/`generateRound` honor `roundCap`); reaching round 3 throws until everyone
   checks in (`markArrived`) or is removed (`removeNoShow`, hard-deletes the never-drawn player —
   distinct from `removePlayer`'s soft "(left)"). The in-play readiness sheet (`openReadinessSheet`)
-  takes `{gate}` from `blockedByPending` so the gate's "Continue" label survives the last
-  check-in (after which Americano refills to planned). Full-ready start ⇒ zero new prompts.
+  modes: `{inter}` optional before round 2, `{gate}` mandatory before round 3 (label is cap-based
+  so it survives the last check-in, after which Americano refills to planned), `{redrawIdx}`
+  redraw, `{}` manage. `arrivalsCheckpoint(r, prevIdx)` (called from score-save) **auto-opens**
+  the prompt when the active round finishes with anyone pending. Full-ready start ⇒ zero prompts.
+  (v23) `render()` resets scroll to top on top-level screen/tab change (`lastScreen`) — transitions
+  are bottom-button-triggered, so without it the new screen inherited the old bottom scroll;
+  in-place re-renders (scoring) keep position.
 
 ## Shipped score-view & replay analytics (v18–v19)
 - Past tournaments are archived as **full snapshots** (`store.archive` stores `snapshot`,

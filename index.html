@@ -1241,7 +1241,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v22 · 17 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v23 · 17 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1835,8 +1835,11 @@ function renderRoundsTab() {
     openScoreSheet(viewRound, +el.dataset.match);
   }));
   const nb = $('#next-round-btn');
-  if (nb) nb.addEventListener('click', () => busy(nb, 'Drawing…', () =>
-    mutate(() => { Engine.generateRound(T); viewRound = T.rounds.length - 1; })));
+  if (nb) nb.addEventListener('click', () => {
+    // Mexicano: confirm arrivals before drawing the next round when anyone's still pending
+    if (Engine.pendingPlayers(T).length) { openReadinessSheet({ inter: true, nextRoundNo: T.rounds.length + 1 }); return; }
+    busy(nb, 'Drawing…', () => mutate(() => { Engine.generateRound(T); viewRound = T.rounds.length - 1; }));
+  });
   const eb = $('#extra-round-btn');
   if (eb) eb.addEventListener('click', () => busy(eb, 'Drawing…', () =>
     mutate(() => {
@@ -1845,7 +1848,7 @@ function renderRoundsTab() {
       viewRound = T.rounds.length - 1;
     })));
   const rdb = $('#readiness-btn');
-  if (rdb) rdb.addEventListener('click', () => openReadinessSheet({ gate: blockedByPending }));
+  if (rdb) rdb.addEventListener('click', () => openReadinessSheet(blockedByPending ? { gate: true } : {}));
   const rb = $('#regen-btn');
   if (rb) rb.addEventListener('click', () => {
     // in partial mode, confirm who's arrived before re-drawing so latecomers land in the new draw
@@ -2107,7 +2110,11 @@ function renderScoreSheet() {
   });
   $('#score-save').addEventListener('click', () => {
     // keep the sheet open if the score is rejected (e.g. games mode needs a first-to-N result)
-    if (mutate(() => Engine.setScore(T, r, mi, scoreCtx.a, scoreCtx.b))) closeScoreSheet();
+    const prevIdx = currentRoundIdx(T);
+    if (mutate(() => Engine.setScore(T, r, mi, scoreCtx.a, scoreCtx.b))) {
+      closeScoreSheet();
+      arrivalsCheckpoint(r, prevIdx);
+    }
   });
   const sc = $('#score-cancel');
   if (sc) sc.addEventListener('click', closeScoreSheet);
@@ -2299,20 +2306,38 @@ function openPlayersSheet(editPid) {
 }
 
 /**
- * Readiness sheet — check late arrivals in (or remove no-shows). Three uses:
- *  - manage: tick people in any time during the first rounds (they redraw into the next round)
- *  - gate:   mandatory before the round past PARTIAL_ROUND_CAP — everyone must be in or removed
- *  - redraw: pass a round index to re-draw that round after confirming who's arrived
+ * After finishing the active round with latecomers still pending, prompt for arrivals before
+ * the next round: optional before round 2 (tick people in → that round redraws, or continue),
+ * mandatory at the cap before round 3. No-op for a full roster or when editing an earlier round.
+ */
+function arrivalsCheckpoint(roundIdx, prevIdx) {
+  if (!Engine.pendingPlayers(T).length) return;          // full roster — nothing to ask
+  if (roundIdx !== prevIdx) return;                       // editing an earlier round, not advancing
+  if (!Engine.roundComplete(T, roundIdx)) return;         // round not actually finished yet
+  if (roundIdx + 1 >= T.config.plannedRounds) return;     // no further round to play
+  if (roundIdx + 1 >= Engine.PARTIAL_ROUND_CAP) openReadinessSheet({ gate: true });
+  else openReadinessSheet({ inter: true, nextRoundNo: roundIdx + 2 });
+}
+
+/**
+ * Readiness sheet — check late arrivals in (or remove no-shows). Modes via opts:
+ *  - {inter, nextRoundNo}: before the next round (optional) — tick latecomers in (redraws that
+ *    round) or continue with who's here. Auto-shown when a round finishes with people pending.
+ *  - {gate}: mandatory before the round past PARTIAL_ROUND_CAP — everyone must be in or removed.
+ *  - {redrawIdx}: re-draw that round after confirming who's arrived.
+ *  - {} (manage): opened from the banner mid-round; just closes.
  */
 function openReadinessSheet(opts) {
   opts = opts || {};
   const pend = Engine.pendingPlayers(T);
   const arrivedN = Engine.activePlayers(T).length;
   const isRedraw = typeof opts.redrawIdx === 'number';
-  // gate = caller reached the partial-round cap (mandatory before the next round). Passed in
-  // explicitly so the label/behaviour survive the last check-in (which refills the schedule).
+  // gate (mandatory) is passed explicitly so its label/behaviour survive the last check-in
+  // (which refills the schedule); inter (optional) is the after-round-1/before-round-2 prompt.
   const gate = !isRedraw && !!opts.gate;
-  const nextRoundNo = Engine.PARTIAL_ROUND_CAP + 1; // a partial roster always stalls before round 3
+  const inter = !isRedraw && !gate && !!opts.inter;
+  const advancing = gate || inter;
+  const nextRoundNo = gate ? (Engine.PARTIAL_ROUND_CAP + 1) : (opts.nextRoundNo || currentRoundIdx(T) + 1);
   const ov = sheet(`
     <div class="grab"></div>
     <h3>${pend.length ? 'Who has arrived?' : 'Everyone is here'}</h3>
@@ -2322,7 +2347,11 @@ function openReadinessSheet(opts) {
         ? (pend.length
           ? `Round ${nextRoundNo} needs the full group — check everyone in, or remove no-shows.`
           : `Everyone's in — continue to round ${nextRoundNo}.`)
-        : 'Tick players in as they arrive — they join the draw from the next round.'}</div>
+        : inter
+          ? (pend.length
+            ? `Anyone arrived? Tick them in to join round ${nextRoundNo} (it'll be re-drawn), or continue with who's here.`
+            : `Everyone's in — continue to round ${nextRoundNo}.`)
+          : 'Tick players in as they arrive — they join the draw from the next round.'}</div>
     <div class="proster">
       ${pend.length ? pend.map(p => `
         <div class="player-row">
@@ -2339,8 +2368,8 @@ function openReadinessSheet(opts) {
     <div class="sheet-actions">
       ${isRedraw
         ? `<button class="btn btn-primary" id="rd-go" style="flex:2">⟲ Re-draw round ${opts.redrawIdx + 1}</button>`
-        : gate
-          ? `<button class="btn btn-primary" id="rd-continue" style="flex:2" ${pend.length ? 'disabled' : ''}>Continue to round ${nextRoundNo}</button>`
+        : advancing
+          ? `<button class="btn btn-primary" id="rd-continue" style="flex:2" ${gate && pend.length ? 'disabled' : ''}>Continue to round ${nextRoundNo}</button>`
           : `<button class="btn btn-primary" id="rd-done" style="flex:2">Done</button>`}
     </div>`);
   ov.querySelectorAll('[data-here]').forEach(b => b.addEventListener('click', () => {
@@ -2864,6 +2893,7 @@ function renderResults() {
 
 /* ---------------- root ---------------- */
 
+let lastScreen = null;
 function render() {
   closeSheet();
   if (checkin) {
@@ -2874,6 +2904,11 @@ function render() {
   } else {
     renderPlay();
   }
+  // Reset scroll to the top on a real screen/tab change — each transition is triggered
+  // by a button at the bottom of the previous screen, so without this the new screen
+  // inherits the old bottom scroll. In-place re-renders (scoring, round nav) keep position.
+  const screen = checkin ? 'checkin' : !T ? 'setup' : T.finished ? 'results' : 'play:' + tab;
+  if (screen !== lastScreen) { window.scrollTo(0, 0); lastScreen = screen; }
 }
 
 const warn = document.getElementById('js-warn');
