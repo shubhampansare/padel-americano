@@ -895,18 +895,23 @@ const Engine = (() => {
   }
 
   /**
-   * Drop every trailing round without scores and redraw: Americano refills to the
-   * planned count, Mexicano regenerates the single pending round it had. Called
-   * after any change that affects draws (roster, courts, skills). Played rounds
-   * are never touched. No-op before the tournament has started.
+   * Redraw the provisional rounds after a change to roster, courts or skills.
+   * The round being played (first incomplete) and every earlier round are FROZEN —
+   * a match already on court must never change under the players' feet, even before
+   * its score is entered. A played-but-unscored round is indistinguishable from a
+   * never-played provisional one, so we err on the side of never touching the
+   * current round; only rounds strictly after it are dropped and redrawn. To fold a
+   * change into the current round on purpose, use regenerateRound (the explicit
+   * "re-draw round" action / the post-round arrivals prompt). No-op before start.
    */
   function redrawFuture(t, rng) {
-    const before = t.rounds.length;
-    let dropped = 0;
-    while (t.rounds.length && !anyScores(t.rounds[t.rounds.length - 1])) { t.rounds.pop(); dropped++; }
-    if (!before || activePlayers(t).length < 4) return;
+    if (!t.rounds.length) return;
+    let cur = t.rounds.findIndex((_, i) => !roundComplete(t, i));
+    if (cur === -1) cur = t.rounds.length - 1;     // all complete → last round is current
+    while (t.rounds.length - 1 > cur) t.rounds.pop();
+    if (activePlayers(t).length < 4) return;
     if (t.config.format === 'americano') refillPlanned(t, rng);
-    else if (dropped) generateRound(t, rng);
+    // mexicano draws its next round lazily (on advance), so nothing to regenerate here.
   }
 
   /** Change the planned round count; trims/refills unplayed rounds (Americano). */
@@ -1241,7 +1246,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v23 · 17 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v24 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -2374,13 +2379,13 @@ function openReadinessSheet(opts) {
     </div>`);
   ov.querySelectorAll('[data-here]').forEach(b => b.addEventListener('click', () => {
     const p = T.players.find(x => x.id === b.dataset.here);
-    if (mutate(() => Engine.markArrived(T, p.id))) toast(p.name + ' checked in');
+    if (mutate(() => Engine.markArrived(T, p.id))) { opts._changed = true; toast(p.name + ' checked in'); }
     openReadinessSheet(opts);
   }));
   ov.querySelectorAll('[data-noshow]').forEach(b => b.addEventListener('click', () => {
     const p = T.players.find(x => x.id === b.dataset.noshow);
     confirmSheet(`Remove ${p.name}?`, 'They never checked in — this removes them from the tournament entirely.', 'Remove', () => {
-      mutate(() => Engine.removeNoShow(T, p.id));
+      if (mutate(() => Engine.removeNoShow(T, p.id))) opts._changed = true;
       openReadinessSheet(opts);
     });
   }));
@@ -2388,6 +2393,20 @@ function openReadinessSheet(opts) {
   if (go) go.addEventListener('click', () => { closeSheet(); mutate(() => { Engine.regenerateRound(T, opts.redrawIdx); viewRound = opts.redrawIdx; }); });
   const advance = () => {
     closeSheet();
+    // Fold the latecomers we just checked in into the upcoming round. markArrived froze
+    // the current round defensively (the engine can't tell "about to play" from "just
+    // played"), but this prompt only fires right after a round was scored, so the current
+    // round is genuinely unplayed — an explicit re-draw here is safe and expected. Manual
+    // "manage" mode isn't `advancing`, so a mid-round check-in never disturbs the match on
+    // court. Only re-draw when the upcoming round is actually missing an active player
+    // (the gate already refilled fresh provisional rounds that include everyone).
+    if (advancing && opts._changed && T.config.format === 'americano') {
+      const ci = currentRoundIdx(T);
+      const inRound = new Set(T.rounds[ci].resting.concat(T.rounds[ci].matches.flatMap(m => m.teamA.concat(m.teamB))));
+      if (!Engine.roundComplete(T, ci) && Engine.activePlayers(T).some(p => !inRound.has(p.id))) {
+        mutate(() => Engine.regenerateRound(T, ci));
+      }
+    }
     // Mexicano draws lazily — draw the now-unblocked round; Americano already refilled on check-in
     if (T.config.format === 'mexicano' && T.rounds.every((_, i) => Engine.roundComplete(T, i)) && T.rounds.length < T.config.plannedRounds) {
       mutate(() => { Engine.generateRound(T); viewRound = T.rounds.length - 1; });

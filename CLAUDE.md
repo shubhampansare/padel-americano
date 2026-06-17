@@ -41,7 +41,15 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   unavoidable; sit-outs never depend on scores.
 - Americano: full schedule pre-drawn; rounds after the current are **provisional** — they
   redraw immediately on any roster/court/skill change and are locked for scoring (engine
-  throws "Finish round N first"). Played rounds are never touched.
+  throws "Finish round N first"). The **current round (first incomplete) and every earlier
+  round are frozen** — `redrawFuture` only ever drops/redraws rounds *strictly after* the
+  current one, keyed on `roundComplete` (NOT on `anyScores`). This is deliberate: a
+  played-but-unscored round is indistinguishable from a never-played one, and a match
+  already on court must never change under the players' feet. To fold a change into the
+  current round on purpose, use `regenerateRound` (the explicit "Re-draw round" button, or
+  the post-round arrivals prompt — see v24 below). (v23 and earlier dropped any unscored
+  trailing round, so checking a latecomer in before scoring the round on court reshuffled
+  it — the v24 fix.)
 - Mexicano: rounds drawn lazily (pairings depend on live standings: 1st+4th vs 2nd+3rd per
   court); skill badges have no role in Mexicano.
 - Sit-out compensation modes: none | half (fixed N/2) | avg (player's own pts/game,
@@ -72,6 +80,16 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   so it survives the last check-in, after which Americano refills to planned), `{redrawIdx}`
   redraw, `{}` manage. `arrivalsCheckpoint(r, prevIdx)` (called from score-save) **auto-opens**
   the prompt when the active round finishes with anyone pending. Full-ready start ⇒ zero prompts.
+  (v24) `markArrived` (like every roster change) routes through `redrawFuture`, which now
+  **freezes the current round** (see Americano invariant above) — so a bare check-in, e.g. from
+  the `{}` manage banner mid-round, never disturbs the match on court even if its score isn't in
+  yet (the reported bug). The check-in still folds the latecomer into the *next* round only when
+  it's safe to: `openReadinessSheet`'s `advance()` re-draws the upcoming round (`regenerateRound`)
+  **only in the advancing `{inter}`/`{gate}` flows** (which fire right after a round was scored, so
+  the upcoming round is genuinely unplayed) and **only if `opts._changed`** (someone actually
+  checked in / was removed) **and the round is missing an active player**. Manual `{}` manage is
+  not `advancing`, so it leaves the current round alone and the latecomer joins from the next
+  provisional round.
   (v23) `render()` resets scroll to top on top-level screen/tab change (`lastScreen`) — transitions
   are bottom-button-triggered, so without it the new screen inherited the old bottom scroll;
   in-place re-renders (scoring) keep position.

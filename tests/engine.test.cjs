@@ -277,28 +277,92 @@ console.log('== Roster changes mid-tournament ==');
   const t = E.createTournament({ players: names(9), courts: 2, pointsPerMatch: 24, plannedRounds: 6 });
   E.refillPlanned(t, rng);
   ok(t.rounds.length === 6, 'prefilled to planned');
+  // round 0 played & scored -> round 1 is now the current round and stays frozen;
+  // the new player joins from the next provisional round (index 2) onward.
   for (let mi = 0; mi < 2; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, 0, mi, a, b); }
+  const curSnap = JSON.stringify(t.rounds[1]);
   const p10 = E.addPlayer(t, 'P10', rng);
   ok(t.rounds.length === 6, 'refilled to planned after add');
-  const r2 = t.rounds[1];
-  const inRound = new Set(r2.resting.concat(r2.matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(inRound.has(p10.id), 'new player included in redrawn round 2');
-  ok(inRound.size === 10, 'redrawn round covers 10 players');
-  checkRoundStructure(t, r2, 'after addPlayer');
+  ok(JSON.stringify(t.rounds[1]) === curSnap, 'current round frozen by addPlayer');
+  const r3 = t.rounds[2];
+  const inRound = new Set(r3.resting.concat(r3.matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(inRound.has(p10.id), 'new player included from the next provisional round');
+  ok(inRound.size === 10, 'redrawn provisional round covers 10 players');
+  checkRoundStructure(t, r3, 'after addPlayer');
 
-  // remove a player -> excluded from redrawn future rounds, kept in standings
-  for (let mi = 0; mi < r2.matches.length; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, 1, mi, a, b); }
+  // remove a player -> excluded from redrawn provisional rounds, kept in standings.
+  // Score round 1 (the frozen current round) so the current round advances to index 2,
+  // which is then frozen; the removal lands in the provisional rounds after it.
+  for (let mi = 0; mi < t.rounds[1].matches.length; mi++) { const [a, b] = randomScore(t, rng); E.setScore(t, 1, mi, a, b); }
   const victim = E.activePlayers(t)[0];
   E.removePlayer(t, victim.id, rng);
-  const r3 = t.rounds[2];
-  const inR3 = new Set(r3.resting.concat(r3.matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(!inR3.has(victim.id), 'removed player not in redrawn round 3');
+  const r4 = t.rounds[3];
+  const inR4 = new Set(r4.resting.concat(r4.matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(!inR4.has(victim.id), 'removed player not in redrawn provisional round');
   ok(E.standings(t).some(s => s.player.id === victim.id), 'removed player still in standings');
-  checkRoundStructure(t, r3, 'after removePlayer');
+  checkRoundStructure(t, r4, 'after removePlayer');
 
   // guard: cannot drop below 4 active
   const t4 = E.createTournament({ players: names(4), courts: 1 });
   assert.throws(() => E.removePlayer(t4, t4.players[0].id, rng), /at least 4/);
+}
+
+// ----------------------------------- late arrivals never reshuffle a played round
+// Regression: checking a latecomer in must not change the round already on court,
+// even when its score has not been entered yet. The in-progress round (first
+// incomplete) and every earlier round are frozen; only later provisional rounds
+// redraw. (The bug: redrawFuture treated any *unscored* trailing round as
+// provisional, so a played-but-unscored round got dropped and redrawn.)
+console.log('== Late arrivals freeze the round being played ==');
+{
+  const rng = mulberry32(7);
+  // 5 here + 1 pending, 1 court, 6 planned -> capped at 2 rounds while pending.
+  const t = E.createTournament({
+    players: ['P1', 'P2', 'P3', 'P4', 'P5', { name: 'Late', arrived: false }],
+    courts: 1, pointsPerMatch: 24, plannedRounds: 6,
+  });
+  E.refillPlanned(t, rng);
+  ok(t.rounds.length === 2, 'capped at 2 rounds while a player is pending');
+  const lateId = t.players.find(p => p.name === 'Late').id;
+
+  // Round 1 was played on court but is NOT scored yet, then the latecomer checks in.
+  const round0 = JSON.stringify(t.rounds[0]);
+  E.markArrived(t, lateId, rng);
+  ok(JSON.stringify(t.rounds[0]) === round0, 'check-in leaves the in-progress (unscored) round untouched');
+  const r0ids = new Set(t.rounds[0].resting.concat(t.rounds[0].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(!r0ids.has(lateId), 'latecomer not forced into the round already being played');
+
+  // Cap lifts once nobody is pending -> schedule refills to planned, latecomer included.
+  ok(t.rounds.length === 6, 'schedule refills to planned once nobody is pending');
+  const r1ids = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(r1ids.has(lateId), 'latecomer joins from the next (provisional) round');
+  for (let i = 1; i < t.rounds.length; i++) checkRoundStructure(t, t.rounds[i], `post check-in r${i + 1}`);
+
+  // The played round's score can still be entered afterwards.
+  E.setScore(t, 0, 0, 14, 10);
+  ok(t.rounds[0].matches[0].scoreA === 14, 'played round stays scorable after a late check-in');
+}
+
+// ----------------------------------- bare check-in freezes the current round too
+// After a round is scored, the next-up round becomes the current round. A bare
+// markArrived still freezes it (we can't tell "about to play" from "just played");
+// the UI folds latecomers into it with an explicit re-draw (the post-round prompt).
+console.log('== Bare check-in freezes current round; explicit re-draw folds in ==');
+{
+  const rng = mulberry32(11);
+  const t = E.createTournament({
+    players: ['A', 'B', 'C', 'D', 'E', 'F', 'G', { name: 'Z', arrived: false }],
+    courts: 1, pointsPerMatch: 24, plannedRounds: 6,
+  });
+  E.refillPlanned(t, rng);
+  E.setScore(t, 0, 0, 14, 10);          // round 0 complete -> current round is index 1
+  const zId = t.players.find(p => p.name === 'Z').id;
+  const cur = JSON.stringify(t.rounds[1]);
+  E.markArrived(t, zId, rng);
+  ok(JSON.stringify(t.rounds[1]) === cur, 'bare check-in freezes the current (next-up) round too');
+  E.regenerateRound(t, 1, rng);          // explicit re-draw (the inter-prompt path)
+  const ids = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(ids.has(zId), 'explicit re-draw of the current round includes the latecomer');
 }
 
 // ------------------------------------------- skill change redraws provisionals
@@ -387,26 +451,28 @@ console.log('== Rename, rejoin, change courts (with provisional refill) ==');
   E.setScore(t, 1, 0, 14, 10); // round 1 complete -> round 2 scorable now
   E.clearScore(t, 1, 0);
 
-  // remove someone -> unplayed rounds (2..8) redraw immediately without them
+  // round 0 played & scored, round 1 (current) frozen -> changes land in provisional rounds 3..8
+  // remove someone -> the current round stays put; provisional rounds redraw without them
   const out = E.activePlayers(t)[3];
   E.removePlayer(t, out.id, rng);
   ok(t.rounds.length === 8, 'still filled to planned after removal');
-  for (let i = 1; i < 8; i++) {
+  for (let i = 2; i < 8; i++) {
     const ids = new Set(t.rounds[i].resting.concat(t.rounds[i].matches.flatMap(m => m.teamA.concat(m.teamB))));
-    ok(!ids.has(out.id), `removed player absent from redrawn round ${i + 1}`);
+    ok(!ids.has(out.id), `removed player absent from redrawn provisional round ${i + 1}`);
     checkRoundStructure(t, t.rounds[i], `after remove r${i + 1}`);
   }
-  // rejoin -> future rounds redraw to include them again
+  // rejoin -> provisional rounds redraw to include them again
   E.reactivatePlayer(t, out.id, rng);
   ok(t.rounds.length === 8, 'still filled to planned after rejoin');
-  const inR2 = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(inR2.has(out.id), 'rejoined player back in the next draw');
+  const inR3 = new Set(t.rounds[2].resting.concat(t.rounds[2].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(inR3.has(out.id), 'rejoined player back in the next provisional draw');
 
-  // change courts mid-tournament: future rounds use 1 court, played round untouched
+  // change courts mid-tournament: provisional rounds use 1 court; played & current rounds untouched
   E.setCourts(t, 1, rng);
   ok(t.rounds.length === 8, 'filled to planned after court change');
-  ok(t.rounds[1].matches.length === 1 && t.rounds[1].resting.length === 6, 'court change applied to next draw');
-  ok(t.rounds[0].matches.length === 2, 'past round untouched by court change');
+  ok(t.rounds[2].matches.length === 1 && t.rounds[2].resting.length === 6, 'court change applied to next provisional round');
+  ok(t.rounds[0].matches.length === 2, 'played round untouched by court change');
+  ok(t.rounds[1].matches.length === 2, 'current round untouched by court change');
   assert.throws(() => E.setCourts(t, 0, rng), /1-6/);
 
   // shrinking/growing the plan trims/refills unplayed rounds only
@@ -426,12 +492,19 @@ console.log('== Mexicano roster change keeps lazy draws ==');
   E.refillPlanned(t, rng);
   ok(t.rounds.length === 1, 'refillPlanned is a no-op for mexicano');
   for (let mi = 0; mi < 2; mi++) E.setScore(t, 0, mi, 14, 10);
-  E.generateRound(t, rng); // pending round 2
+  E.generateRound(t, rng); // round 2 (index 1) drawn — now the current round
+  const curSnap = JSON.stringify(t.rounds[1]);
   const p10 = E.addPlayer(t, 'P10', rng);
-  ok(t.rounds.length === 2, 'mexicano: pending round regenerated, no prefill');
+  ok(t.rounds.length === 2, 'mexicano: no prefill, current round kept');
+  ok(JSON.stringify(t.rounds[1]) === curSnap, 'mexicano: current round frozen by addPlayer');
   const ids = new Set(t.rounds[1].resting.concat(t.rounds[1].matches.flatMap(m => m.teamA.concat(m.teamB))));
-  ok(ids.has(p10.id), 'mexicano: new player in regenerated round');
-  checkRoundStructure(t, t.rounds[1], 'mexicano after addPlayer');
+  ok(!ids.has(p10.id), 'mexicano: new player not forced into the current round');
+  // they join the next lazily-drawn round instead
+  for (let mi = 0; mi < t.rounds[1].matches.length; mi++) E.setScore(t, 1, mi, 14, 10);
+  E.generateRound(t, rng);
+  const ids3 = new Set(t.rounds[2].resting.concat(t.rounds[2].matches.flatMap(m => m.teamA.concat(m.teamB))));
+  ok(ids3.has(p10.id), 'mexicano: new player joins the next drawn round');
+  checkRoundStructure(t, t.rounds[2], 'mexicano after addPlayer');
 }
 
 // ---------------------------------------------------------- rest compensation
