@@ -365,6 +365,70 @@ console.log('== Bare check-in freezes current round; explicit re-draw folds in =
   ok(ids.has(zId), 'explicit re-draw of the current round includes the latecomer');
 }
 
+// --------------------------- shrinking the plan never drops the round being played
+// Regression: setPlannedRounds trimmed trailing rounds by anyScores, so dropping
+// the plan below the round on court (an unscored "current" round) deleted it — the
+// same class as the late-arrival bug, reachable from the Planned-rounds stepper.
+console.log('== setPlannedRounds keeps the current round ==');
+{
+  const rng = mulberry32(77);
+  const t = E.createTournament({ players: names(8), courts: 2, pointsPerMatch: 24, plannedRounds: 6 });
+  E.refillPlanned(t, rng);
+  // play & score rounds 0 and 1 -> round 2 is the current (unscored) round on court
+  for (let r = 0; r < 2; r++) for (let mi = 0; mi < 2; mi++) E.setScore(t, r, mi, 14, 10);
+  const curIdx = t.rounds.findIndex((_, i) => !E.roundComplete(t, i));
+  ok(curIdx === 2, 'current round is index 2');
+  const curSnap = JSON.stringify(t.rounds[2]);
+  // shrink the plan below the current round number — must NOT drop the round on court
+  const n = E.setPlannedRounds(t, 1, rng);
+  ok(t.rounds.length >= 3, 'current round not trimmed away (length ' + t.rounds.length + ')');
+  ok(JSON.stringify(t.rounds[2]) === curSnap, 'round being played is untouched by shrinking the plan');
+  ok(n >= 3 && t.config.plannedRounds >= 3, 'plan cannot drop below the current round');
+  // and trailing provisional rounds CAN still be trimmed
+  const rng2 = mulberry32(78);
+  const t2 = E.createTournament({ players: names(8), courts: 2, pointsPerMatch: 24, plannedRounds: 6 });
+  E.refillPlanned(t2, rng2);
+  E.setScore(t2, 0, 0, 14, 10); E.setScore(t2, 0, 1, 14, 10); // round 0 done, current = 1
+  E.setPlannedRounds(t2, 3, rng2);
+  ok(t2.rounds.length === 3, 'provisional rounds after the current one still trim to plan');
+}
+
+// ------------------------------- no avoidable partner repeats (best-of-N redraw)
+// The greedy per-round matcher occasionally left an avoidable repeat (RNG bad luck),
+// worst with odd/sit-out counts (9p ≈ 20-31% of draws). refillPlanned now draws the
+// schedule several times and keeps the fewest-repeat one — a no-repeat schedule is
+// always findable here, so we assert zero repeats across many seeds.
+console.log('== Americano: no avoidable partner repeats ==');
+{
+  const pkey = (a, b) => (a < b ? a + '|' + b : b + '|' + a);
+  function maxPartnerRep(t) {
+    const c = {};
+    for (const r of t.rounds) for (const m of r.matches) for (const tm of [m.teamA, m.teamB]) {
+      const k = pkey(tm[0], tm[1]); c[k] = (c[k] || 0) + 1;
+    }
+    return Object.values(c).reduce((m, x) => Math.max(m, x), 0);
+  }
+  for (const [n, courts, rounds, label] of [[9, 2, 8, '9p/2c/8r'], [10, 2, 8, '10p/2c/8r'], [8, 2, 7, '8p/2c/7r']]) {
+    let withRepeat = 0;
+    for (let s = 1; s <= 150; s++) {
+      const rng = mulberry32((s * 2654435761) >>> 0);
+      const t = E.createTournament({ players: names(n), courts, plannedRounds: rounds, pointsPerMatch: 24 });
+      E.refillPlanned(t, rng);
+      if (maxPartnerRep(t) >= 2) withRepeat++;
+    }
+    ok(withRepeat === 0, `${label}: ${withRepeat}/150 schedules had a repeated pair (want 0)`);
+  }
+  // skills on must also stay repeat-free in a tight group
+  let skRepeat = 0;
+  for (let s = 1; s <= 150; s++) {
+    const rng = mulberry32((s * 40503) >>> 0);
+    const t = E.createTournament({ players: names(9).map(nm => ({ name: nm, skill: 1 + (s + nm.length) % 3 })), courts: 2, useSkills: true, plannedRounds: 8, pointsPerMatch: 24 });
+    E.refillPlanned(t, rng);
+    if (maxPartnerRep(t) >= 2) skRepeat++;
+  }
+  ok(skRepeat === 0, `9p/2c/8r skills-on: ${skRepeat}/150 had a repeated pair (want 0)`);
+}
+
 // ------------------------------------------- skill change redraws provisionals
 console.log('== Skill change redraws provisional rounds ==');
 {

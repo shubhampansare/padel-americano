@@ -39,6 +39,16 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
 - Standings always recompute from raw match scores (never incremental).
 - Fairness: no consecutive sit-outs; games played spread ≤1; partner repeats only when
   unavoidable; sit-outs never depend on scores.
+- Partner-repeat avoidance (Americano): the per-round matcher (`bestAmericanoMatches`) reads
+  `historyCounts` and its cost penalizes repeats (`100·c²`), so it avoids re-pairing people
+  who already partnered. But it's **greedy** (no lookahead), so an early round could force an
+  avoidable repeat later — worst with odd/sit-out counts (9p ≈ 20–31% of single draws). v25:
+  `refillPlanned` now draws the provisional tail up to `REFILL_TRIES (10)` times and keeps the
+  fewest-`partnerRepeatTotal` variant, stopping early on a clean draw. Drops avoidable repeats
+  to ~0% (9p 20%→0%, 10p default →0%) at negligible cost (early-exit when already clean; only
+  the cheap small-group draws ever loop). Mexicano is unaffected — it pairs by standings
+  (1st+4th vs 2nd+3rd) and repeats partners by design (~9–13 repeats/tournament); use Americano
+  if you want partner variety.
 - Americano: full schedule pre-drawn; rounds after the current are **provisional** — they
   redraw immediately on any roster/court/skill change and are locked for scoring (engine
   throws "Finish round N first"). The **current round (first incomplete) and every earlier
@@ -49,7 +59,10 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   current round on purpose, use `regenerateRound` (the explicit "Re-draw round" button, or
   the post-round arrivals prompt — see v24 below). (v23 and earlier dropped any unscored
   trailing round, so checking a latecomer in before scoring the round on court reshuffled
-  it — the v24 fix.)
+  it — the v24 fix.) `setPlannedRounds` carried the same `anyScores` flaw — shrinking the
+  plan below the round on court deleted it; v25 keys it on `roundComplete` too, only trimming
+  provisional rounds strictly after the current one. (Verified: an immutability fuzzer over
+  ~110k random mid-tournament operations finds zero changes to any played/current round.)
 - Mexicano: rounds drawn lazily (pairings depend on live standings: 1st+4th vs 2nd+3rd per
   court); skill badges have no role in Mexicano.
 - Sit-out compensation modes: none | half (fixed N/2) | avg (player's own pts/game,

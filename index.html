@@ -885,13 +885,35 @@ const Engine = (() => {
     return round;
   }
 
+  /** total partner-pair repeats across the whole schedule (times-together beyond the first). */
+  function partnerRepeatTotal(t) {
+    const { partner } = historyCounts(t);
+    let extra = 0;
+    for (const k in partner) if (partner[k] > 1) extra += partner[k] - 1;
+    return extra;
+  }
+
+  // The per-round matcher already minimizes repeats against history, but it's greedy
+  // (no lookahead), so an early round can force an avoidable repeat several rounds later
+  // — worst with odd/sit-out counts. Drawing the provisional tail a few times and keeping
+  // the fewest-repeat variant finds a clean schedule (a no-repeat one almost always exists).
+  const REFILL_TRIES = 10;
+
   /** Americano: draw every planned round upfront (rounds beyond the current are provisional). */
   function refillPlanned(t, rng) {
     if (t.config.format !== 'americano') return;
     const cap = Math.min(t.config.plannedRounds, roundCap(t));
-    while (t.rounds.length < cap && activePlayers(t).length >= 4) {
-      generateRound(t, rng);
+    const prefix = t.rounds;                       // played + current rounds — kept verbatim
+    if (prefix.length >= cap || activePlayers(t).length < 4) return;
+    let best = null, bestRep = Infinity;
+    for (let k = 0; k < REFILL_TRIES; k++) {
+      t.rounds = prefix.slice();                    // restart from the kept prefix each try
+      while (t.rounds.length < cap && activePlayers(t).length >= 4) generateRound(t, rng);
+      const rep = partnerRepeatTotal(t);
+      if (rep < bestRep) { bestRep = rep; best = t.rounds; }
+      if (rep === 0) break;                         // a clean schedule — stop early
     }
+    t.rounds = best;
   }
 
   /**
@@ -914,11 +936,17 @@ const Engine = (() => {
     // mexicano draws its next round lazily (on advance), so nothing to regenerate here.
   }
 
-  /** Change the planned round count; trims/refills unplayed rounds (Americano). */
+  /** Change the planned round count; trims/refills provisional rounds (Americano). */
   function setPlannedRounds(t, n, rng) {
     n = Math.max(1, Math.floor(Number(n) || 0));
-    while (t.rounds.length > n && !anyScores(t.rounds[t.rounds.length - 1])) t.rounds.pop();
-    n = Math.max(n, t.rounds.length); // can never plan below what's already played
+    // Never trim the round being played (first incomplete) or any earlier round —
+    // only trailing provisional rounds may go. Keyed on roundComplete, not anyScores,
+    // so shrinking the plan can't delete a played-but-unscored round on court.
+    let cur = t.rounds.findIndex((_, i) => !roundComplete(t, i));
+    if (cur === -1) cur = t.rounds.length - 1;
+    const keep = cur + 1; // current round + everything before it stays
+    while (t.rounds.length > Math.max(n, keep) && !anyScores(t.rounds[t.rounds.length - 1])) t.rounds.pop();
+    n = Math.max(n, t.rounds.length); // can never plan below what's already reached
     t.config.plannedRounds = n;
     refillPlanned(t, rng);
     return n;
@@ -1246,7 +1274,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v24 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v25 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
