@@ -897,7 +897,9 @@ const Engine = (() => {
   // (no lookahead), so an early round can force an avoidable repeat several rounds later
   // — worst with odd/sit-out counts. Drawing the provisional tail a few times and keeping
   // the fewest-repeat variant finds a clean schedule (a no-repeat one almost always exists).
-  const REFILL_TRIES = 10;
+  // Tries are cheap: a clean draw stops the loop early, so only the rare tight small-group
+  // cases ever iterate; large groups are repeat-free on the first try.
+  const REFILL_TRIES = 40;
 
   /** Americano: draw every planned round upfront (rounds beyond the current are provisional). */
   function refillPlanned(t, rng) {
@@ -939,14 +941,15 @@ const Engine = (() => {
   /** Change the planned round count; trims/refills provisional rounds (Americano). */
   function setPlannedRounds(t, n, rng) {
     n = Math.max(1, Math.floor(Number(n) || 0));
-    // Never trim the round being played (first incomplete) or any earlier round —
-    // only trailing provisional rounds may go. Keyed on roundComplete, not anyScores,
-    // so shrinking the plan can't delete a played-but-unscored round on court.
+    // Drop the ENTIRE provisional tail (everything after the round on court), then let
+    // refillPlanned redraw it best-of-N for the new length. Keyed on roundComplete, not
+    // anyScores, so the played-but-unscored round on court is never deleted. Redrawing the
+    // whole tail (not just appended rounds) means growing the plan can't strand an earlier
+    // provisional round into an avoidable partner repeat.
     let cur = t.rounds.findIndex((_, i) => !roundComplete(t, i));
     if (cur === -1) cur = t.rounds.length - 1;
-    const keep = cur + 1; // current round + everything before it stays
-    while (t.rounds.length > Math.max(n, keep) && !anyScores(t.rounds[t.rounds.length - 1])) t.rounds.pop();
-    n = Math.max(n, t.rounds.length); // can never plan below what's already reached
+    while (t.rounds.length - 1 > cur) t.rounds.pop();
+    n = Math.max(n, t.rounds.length); // can never plan below the round on court
     t.config.plannedRounds = n;
     refillPlanned(t, rng);
     return n;
@@ -1274,7 +1277,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v25 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v26 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">

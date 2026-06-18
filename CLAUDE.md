@@ -42,13 +42,21 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
 - Partner-repeat avoidance (Americano): the per-round matcher (`bestAmericanoMatches`) reads
   `historyCounts` and its cost penalizes repeats (`100·c²`), so it avoids re-pairing people
   who already partnered. But it's **greedy** (no lookahead), so an early round could force an
-  avoidable repeat later — worst with odd/sit-out counts (9p ≈ 20–31% of single draws). v25:
-  `refillPlanned` now draws the provisional tail up to `REFILL_TRIES (10)` times and keeps the
-  fewest-`partnerRepeatTotal` variant, stopping early on a clean draw. Drops avoidable repeats
-  to ~0% (9p 20%→0%, 10p default →0%) at negligible cost (early-exit when already clean; only
-  the cheap small-group draws ever loop). Mexicano is unaffected — it pairs by standings
-  (1st+4th vs 2nd+3rd) and repeats partners by design (~9–13 repeats/tournament); use Americano
-  if you want partner variety.
+  avoidable repeat later — worst with odd/sit-out counts (9p ≈ 20–31% of single draws). v25/v26:
+  `refillPlanned` draws the provisional tail up to `REFILL_TRIES (40)` times and keeps the
+  fewest-`partnerRepeatTotal` variant, stopping early on a clean draw. `setPlannedRounds` drops
+  the **whole** provisional tail (everything after the round on court) before refilling, so
+  best-of-N optimizes the entire remaining schedule — growing the plan can't strand an earlier
+  provisional round into an avoidable repeat (v26 fixed this; pre-v26 grow only appended).
+  Result: avoidable repeats →0% for realistic configs (9p/10p/11p skills on+off →0.000% over
+  3000-seed sweeps) and **0 avoidable repeats** across ~19k menu-driven churn states. Cost is
+  negligible (early-exit when clean; only the rare tight small-group draws iterate). KNOWN edge:
+  8 players playing **exactly** 7 rounds (the 1-factorization limit, everyone plays every round)
+  WITH skills on ≈ 1% chance of one repeated pair — the only no-repeat arrangement isn't
+  skill-balanced, so the cost (`100·c²` repeat vs `40·over²` skill, over≥2 ⇒ skill>repeat) picks
+  the balanced match. Tunable by making the repeat weight dominate skill (deliberately not done;
+  user chose best-of-N over "variety-over-balance"). Mexicano is unaffected — it pairs by
+  standings (1st+4th vs 2nd+3rd) and repeats partners by design (~9–13 repeats/tournament).
 - Americano: full schedule pre-drawn; rounds after the current are **provisional** — they
   redraw immediately on any roster/court/skill change and are locked for scoring (engine
   throws "Finish round N first"). The **current round (first incomplete) and every earlier
