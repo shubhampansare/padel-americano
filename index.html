@@ -1277,7 +1277,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v27 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v28 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -3076,15 +3076,10 @@ function renderSharedView(snap) {
         ${standingsTableHTML(snap)}
         ${scoreViewsHTML(snap)}
         ${roundByRoundHTML(snap)}
-
-        <div class="round-actions" style="margin-top:24px">
-          <button class="btn btn-primary btn-block" id="sv-new">🎾 Run your own Americano</button>
-        </div>
       </div>
       ${footerHTML()}
     </div>
   </div>`;
-  $('#sv-new').addEventListener('click', exitSharedView);
 }
 
 function renderShareError() {
@@ -3094,19 +3089,11 @@ function renderShareError() {
       <div class="results-inner" style="text-align:center">
         <div style="font-size:2.6rem;margin-bottom:10px">🔗</div>
         <h2 style="margin:0 0 6px">Link looks incomplete</h2>
-        <div class="sub" style="margin-bottom:26px">This shared results link is broken or got cut off in transit. Ask for the full link, or start your own tournament.</div>
-        <button class="btn btn-primary btn-block" id="se-new">Open the app</button>
+        <div class="sub">This shared results link is broken or got cut off in transit. Ask whoever shared it for the full link.</div>
       </div>
       ${footerHTML()}
     </div>
   </div>`;
-  $('#se-new').addEventListener('click', exitSharedView);
-}
-
-// Leave the read-only viewer: strip the #r=… hash and hard-reload into the normal app.
-function exitSharedView() {
-  history.replaceState(null, '', location.pathname + location.search);
-  location.reload();
 }
 
 /* ---------------- root ---------------- */
