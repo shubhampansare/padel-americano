@@ -1277,7 +1277,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v26 · 18 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v27 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1855,6 +1855,7 @@ function renderRoundsTab() {
     </div>` : ''}
 
     <div class="round-actions">
+      ${complete && !isLast ? `<button class="btn btn-primary btn-block" id="goto-next-btn" style="font-size:1.2rem;padding:16px">Next round →</button>` : ''}
       ${pend.length ? `<button class="btn ${blockedByPending ? 'btn-primary' : 'btn-ghost'} btn-block" id="readiness-btn" ${blockedByPending ? 'style="font-size:1.2rem;padding:16px"' : ''}>${blockedByPending ? `✋ Check players in for round ${T.rounds.length + 1}` : '🕒 Manage arrivals'}</button>` : ''}
       ${!isAmericano && isLast && complete && !allPlannedDone && !blockedByPending ? `<button class="btn btn-primary btn-block" id="next-round-btn" style="font-size:1.2rem;padding:16px">Draw round ${T.rounds.length + 1} →</button>` : ''}
       ${allPlannedDone ? `
@@ -1866,6 +1867,8 @@ function renderRoundsTab() {
 
   $('#rnav-prev').addEventListener('click', () => { viewRound--; render(); });
   $('#rnav-next').addEventListener('click', () => { viewRound++; render(); });
+  const gnb = $('#goto-next-btn');
+  if (gnb) gnb.addEventListener('click', () => { viewRound++; render(); });
   c.querySelectorAll('[data-match]').forEach(el => el.addEventListener('click', () => {
     if (viewRound > curIdx) { toast(`Round ${viewRound + 1} is locked — finish round ${curIdx + 1} first`); return; }
     openScoreSheet(viewRound, +el.dataset.match);
@@ -2651,9 +2654,6 @@ function openHistorySheet() {
 function openReplaySheet(entry) {
   if (!entry || !entry.snapshot) { toast('No replay saved for this one', true); return; }
   const snap = entry.snapshot;
-  const st = Engine.standings(snap);
-  const maxPts = Math.max(1, ...st.map(s => s.points));
-  const hasRests = snap.rounds.some(r => r.resting && r.resting.length);
   const playedRounds = snap.rounds.filter(r => Engine.anyScores(r));
 
   const ov = sheet(`
@@ -2663,27 +2663,15 @@ function openReplaySheet(entry) {
     <div class="sub">${esc(entry.date)} · ${snap.config.format === 'mexicano' ? 'Mexicano' : 'Americano'} · ${playedRounds.length} round${playedRounds.length === 1 ? '' : 's'} played · read-only replay</div>
 
     <div class="field-label">Final standings</div>
-    <table class="stand-table">
-      <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(snap.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
-      <tbody>
-        ${st.map((s, i) => `
-          <tr class="top${i + 1}">
-            <td class="rank">${i + 1}</td>
-            <td class="pname">${esc(s.player.name)}${s.player.active ? '' : ' <span class="out">(left)</span>'}
-              <div class="ptbar"><i style="width:${Math.round(100 * s.points / maxPts)}%"></i></div>
-            </td>
-            <td class="pts">${Math.round(s.points)}</td>
-            <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
-            <td style="color:var(--txt-dim)">${s.wins}·${s.draws}·${s.losses}</td>
-            ${hasRests ? `<td style="color:var(--txt-faint)">${s.rests}</td>` : ''}
-          </tr>`).join('')}
-      </tbody>
-    </table>
+    ${standingsTableHTML(snap)}
 
     ${scoreViewsHTML(snap)}
 
-    ${roundByRoundHTML(snap)}`);
+    ${roundByRoundHTML(snap)}
+
+    <button class="btn btn-primary btn-block" id="rp-share" style="margin-top:20px">🔗 Share results link</button>`);
   ov.querySelector('#rp-back').addEventListener('click', openHistorySheet);
+  ov.querySelector('#rp-share').addEventListener('click', () => shareResultsLink(snap));
 }
 
 /* Round-by-round score list — used on the results screen and in replays.
@@ -2714,6 +2702,31 @@ function roundByRoundHTML(t) {
         </div>`;
       }).join('')}
     </div>`;
+}
+
+/* Read-only final-standings table — shared by the replay sheet and the shareable
+   read-only viewer (#r=… links). Reads a snapshot/tournament object. */
+function standingsTableHTML(snap) {
+  const st = Engine.standings(snap);
+  const maxPts = Math.max(1, ...st.map(s => s.points));
+  const hasRests = snap.rounds.some(r => r.resting && r.resting.length);
+  return `
+    <table class="stand-table">
+      <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(snap.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
+      <tbody>
+        ${st.map((s, i) => `
+          <tr class="top${i + 1}">
+            <td class="rank">${i + 1}</td>
+            <td class="pname">${esc(s.player.name)}${s.player.active ? '' : ' <span class="out">(left)</span>'}
+              <div class="ptbar"><i style="width:${Math.round(100 * s.points / maxPts)}%"></i></div>
+            </td>
+            <td class="pts">${Math.round(s.points)}</td>
+            <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
+            <td style="color:var(--txt-dim)">${s.wins}·${s.draws}·${s.losses}</td>
+            ${hasRests ? `<td style="color:var(--txt-faint)">${s.rests}</td>` : ''}
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
 }
 
 /* ---------------- score views (bump chart · highlights · head-to-head) ---------------- */
@@ -2875,6 +2888,104 @@ function copyRoundDraws() {
   copyText(lines.join('\n'), 'Round draws copied');
 }
 
+/* ---------------- shareable read-only results link ---------------- */
+/* A finished tournament is frozen into the URL hash (#r=…) and opened in a
+   read-only viewer (renderSharedView) — no backend, no network: the whole result
+   is base64url-encoded into the link itself. Only the fields the read-only
+   renderers read are kept, and only scored rounds, to keep the link short. */
+
+function slimSnapshot(t) {
+  return {
+    v: 1,
+    createdAt: t.createdAt || null,
+    config: t.config,
+    players: t.players.map(p => ({ id: p.id, name: p.name, active: p.active, arrived: p.arrived })),
+    rounds: t.rounds.filter(r => Engine.anyScores(r)).map(r => ({
+      matches: r.matches.map(m => ({ teamA: m.teamA, teamB: m.teamB, scoreA: m.scoreA, scoreB: m.scoreB })),
+      resting: r.resting || [],
+    })),
+  };
+}
+
+// base64url over UTF-8 bytes — survives accented names and is URL-safe (no +,/,=).
+function b64urlEncode(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64urlDecode(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  const bin = atob(str), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+/* Compact wire format (v2): a positional array with players referenced by index
+   instead of repeating 8-char ids and JSON keys in every match — ~4-5× shorter
+   links. expandCompact() rebuilds the full snapshot shape the renderers expect.
+   Legacy v1 (a plain object with .config) is still accepted on decode. */
+function compactSnapshot(t) {
+  const slim = slimSnapshot(t);
+  const idx = {}; slim.players.forEach((p, i) => { idx[p.id] = i; });
+  const c = slim.config;
+  const cfg = { n: c.name, f: c.format, s: c.scoring, k: c.ranking, r: c.restMode, p: c.pointsPerMatch, g: c.gamesTarget };
+  const names = slim.players.map(p => p.name);
+  const inactive = [], pending = [];
+  slim.players.forEach((p, i) => { if (p.active === false) inactive.push(i); if (p.arrived === false) pending.push(i); });
+  const rounds = slim.rounds.map(r => [
+    r.matches.map(m => [idx[m.teamA[0]], idx[m.teamA[1]], idx[m.teamB[0]], idx[m.teamB[1]], m.scoreA, m.scoreB]),
+    (r.resting || []).map(pid => idx[pid]),
+  ]);
+  return [2, slim.createdAt || 0, cfg, names, rounds, inactive, pending];
+}
+function expandCompact(a) {
+  if (!Array.isArray(a) || a[0] !== 2) throw new Error('unsupported version');
+  const [, createdAt, cfg, names, rounds, inactive = [], pending = []] = a;
+  const config = { name: cfg.n, format: cfg.f, scoring: cfg.s, ranking: cfg.k, restMode: cfg.r, pointsPerMatch: cfg.p, gamesTarget: cfg.g };
+  const players = names.map((name, i) => ({ id: String(i), name, active: !inactive.includes(i), arrived: !pending.includes(i) }));
+  return {
+    v: 1, createdAt: createdAt || null, config, players,
+    rounds: rounds.map(([ms, rest]) => ({
+      matches: ms.map(m => ({ teamA: [String(m[0]), String(m[1])], teamB: [String(m[2]), String(m[3])], scoreA: m[4], scoreB: m[5] })),
+      resting: (rest || []).map(String),
+    })),
+  };
+}
+function encodeShare(t) { return b64urlEncode(new TextEncoder().encode(JSON.stringify(compactSnapshot(t)))); }
+function decodeShare(str) {
+  const data = JSON.parse(new TextDecoder().decode(b64urlDecode(str)));
+  const snap = Array.isArray(data) ? expandCompact(data) : data; // v2 compact array | legacy v1 object
+  if (!snap || !snap.config || !Array.isArray(snap.players) || !Array.isArray(snap.rounds)) throw new Error('bad snapshot');
+  return snap;
+}
+function shareURL(t) { return location.origin + location.pathname + '#r=' + encodeShare(t); }
+
+/* Share the frozen results by copying the link to the clipboard on every
+   platform (predictable "link copied", no OS share sheet). Falls back to a
+   selectable link sheet only where the clipboard API is unavailable. */
+function shareResultsLink(t) {
+  const url = shareURL(t);
+  if (navigator.clipboard && navigator.clipboard.writeText) { copyText(url, 'Results link copied'); return; }
+  showShareLinkSheet(url);
+}
+
+function showShareLinkSheet(url) {
+  const ov = sheet(`
+    <div class="grab"></div>
+    <h3>Share results link</h3>
+    <div class="sub">Copy this link into your group — anyone who opens it sees the final standings, read-only.</div>
+    <input id="share-link" readonly value="${esc(url)}"
+      style="width:100%;box-sizing:border-box;margin-top:14px;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg1);color:var(--txt);font-size:.82rem;font-family:inherit" />
+    <button class="btn btn-primary btn-block" id="share-copy" style="margin-top:12px">Copy link</button>`);
+  const inp = ov.querySelector('#share-link');
+  inp.addEventListener('focus', () => inp.select());
+  ov.querySelector('#share-copy').addEventListener('click', () => {
+    inp.select();
+    if (navigator.clipboard && navigator.clipboard.writeText) copyText(url, 'Results link copied');
+    else { try { document.execCommand('copy'); toast('Results link copied'); } catch (e) { toast('Select and copy the link', true); } }
+  });
+}
+
 /* ---------------- finish / results ---------------- */
 
 function finishTournament() {
@@ -2892,6 +3003,7 @@ function finishTournament() {
 function renderResults() {
   const st = Engine.standings(T);
   const [p1, p2, p3] = st;
+  const hasRests = T.rounds.some(r => r.resting && r.resting.length);
   const colors = ['#cdf545', '#5fd4f5', '#f5b945', '#f56960', '#e8edf2'];
   const confetti = Array.from({ length: 40 }, (_, i) =>
     `<div class="confetti" style="left:${Math.random() * 100}%;background:${colors[i % colors.length]};animation-delay:${(Math.random() * 1.2).toFixed(2)}s;transform:rotate(${Math.random() * 360}deg)"></div>`).join('');
@@ -2911,7 +3023,7 @@ function renderResults() {
         </div>
       </div>
       <table class="stand-table">
-        <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th></tr></thead>
+        <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
         <tbody>
           ${st.map((s, i) => `
             <tr class="top${i + 1}">
@@ -2920,13 +3032,15 @@ function renderResults() {
               <td class="pts">${Math.round(s.points)}</td>
               <td style="color:${s.diff > 0 ? 'var(--lime)' : s.diff < 0 ? 'var(--red)' : 'var(--txt-faint)'}">${s.diff > 0 ? '+' : ''}${s.diff}</td>
               <td style="color:var(--txt-dim)">${s.wins}·${s.draws}·${s.losses}</td>
+              ${hasRests ? `<td style="color:var(--txt-faint)">${s.rests}</td>` : ''}
             </tr>`).join('')}
         </tbody>
       </table>
       ${scoreViewsHTML(T)}
       ${roundByRoundHTML(T)}
       <div class="round-actions" style="margin-top:24px">
-        <button class="btn btn-primary btn-block" id="res-share">📋 Copy results</button>
+        <button class="btn btn-primary btn-block" id="res-sharelink">🔗 Share results link</button>
+        <button class="btn btn-ghost btn-block" id="res-share">📋 Copy results text</button>
         <button class="btn btn-ghost btn-block" id="res-new">Start a new tournament</button>
         <button class="btn btn-ghost btn-block" id="res-back">← Back to rounds (reopen)</button>
       </div>
@@ -2934,6 +3048,7 @@ function renderResults() {
       ${footerHTML()}
     </div>
   </div>`;
+  $('#res-sharelink').addEventListener('click', () => shareResultsLink(T));
   $('#res-share').addEventListener('click', copyStandings);
   $('#res-new').addEventListener('click', () => {
     store.clearCurrent(); T = null; setupState = defaultSetup(); render();
@@ -2941,11 +3056,76 @@ function renderResults() {
   $('#res-back').addEventListener('click', () => mutate(() => { T.finished = false; }));
 }
 
+/* ---------------- shared read-only viewer (#r=… link target) ---------------- */
+/* Renders a frozen results snapshot read-only. Never reads or writes localStorage
+   or the live tournament, so opening a share link can't disturb the visitor's own
+   in-progress game. */
+function renderSharedView(snap) {
+  const dateStr = snap.createdAt ? new Date(snap.createdAt).toLocaleDateString() : '';
+  const fmt = snap.config.format === 'mexicano' ? 'Mexicano' : 'Americano';
+  const played = snap.rounds.filter(r => Engine.anyScores(r)).length;
+  app.innerHTML = `
+  <div class="screen">
+    <div class="content" style="padding-top:24px">
+      <div class="results-inner">
+        <div style="display:inline-block;background:var(--lime);color:#15200a;font-weight:800;font-size:.66rem;letter-spacing:.08em;padding:5px 11px;border-radius:999px;margin-bottom:12px">👁 READ-ONLY · SHARED RESULTS</div>
+        <h2 style="margin:0 0 4px">${esc(snap.config.name)}</h2>
+        <div class="sub">${dateStr ? esc(dateStr) + ' · ' : ''}${fmt} · ${played} round${played === 1 ? '' : 's'} played</div>
+
+        <div class="field-label" style="margin-top:18px">Final standings</div>
+        ${standingsTableHTML(snap)}
+        ${scoreViewsHTML(snap)}
+        ${roundByRoundHTML(snap)}
+
+        <div class="round-actions" style="margin-top:24px">
+          <button class="btn btn-primary btn-block" id="sv-new">🎾 Run your own Americano</button>
+        </div>
+      </div>
+      ${footerHTML()}
+    </div>
+  </div>`;
+  $('#sv-new').addEventListener('click', exitSharedView);
+}
+
+function renderShareError() {
+  app.innerHTML = `
+  <div class="screen">
+    <div class="content" style="padding-top:60px">
+      <div class="results-inner" style="text-align:center">
+        <div style="font-size:2.6rem;margin-bottom:10px">🔗</div>
+        <h2 style="margin:0 0 6px">Link looks incomplete</h2>
+        <div class="sub" style="margin-bottom:26px">This shared results link is broken or got cut off in transit. Ask for the full link, or start your own tournament.</div>
+        <button class="btn btn-primary btn-block" id="se-new">Open the app</button>
+      </div>
+      ${footerHTML()}
+    </div>
+  </div>`;
+  $('#se-new').addEventListener('click', exitSharedView);
+}
+
+// Leave the read-only viewer: strip the #r=… hash and hard-reload into the normal app.
+function exitSharedView() {
+  history.replaceState(null, '', location.pathname + location.search);
+  location.reload();
+}
+
 /* ---------------- root ---------------- */
+
+// Shared read-only results link (#r=…): decode once at boot. If present, the app
+// renders the frozen snapshot read-only and never loads or saves the live tournament.
+let sharedView = null, sharedError = false;
+(function parseShareLink() {
+  const m = location.hash.match(/^#r=(.+)$/);
+  if (!m) return;
+  try { sharedView = decodeShare(m[1]); }
+  catch (e) { sharedError = true; }
+})();
 
 let lastScreen = null;
 function render() {
   closeSheet();
+  if (sharedView) { try { renderSharedView(sharedView); } catch (e) { renderShareError(); } return; }
+  if (sharedError) { renderShareError(); return; }
   if (checkin) {
     renderReadiness();
   } else if (!T) {
