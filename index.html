@@ -1277,7 +1277,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v29 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v30 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -2781,6 +2781,7 @@ function statHighlightsHTML(t, st, prog) {
   const card = (ico, label, big, sub) =>
     `<div class="stat-card"><div class="sc-ico">${ico}</div><div class="sc-label">${label}</div><div class="sc-big">${big}</div><div class="sc-sub">${sub}</div></div>`;
   const cards = [];
+  let climberId = null; // remembered so the Late bloomer card never re-prints the climber
 
   // biggest climber (first scored round → final); else wire-to-wire leader
   if (prog.length >= 2) {
@@ -2791,7 +2792,7 @@ function statHighlightsHTML(t, st, prog) {
       const d = (first[s.player.id] ?? 0) - lastStep.rank[s.player.id]; // + = climbed up the table
       if (d > 0 && (!best || d > best.d)) best = { id: s.player.id, d };
     }
-    if (best) cards.push(card('🚀', 'Biggest climber', nm(best.id), `up ${best.d} place${best.d > 1 ? 's' : ''} since round ${prog[0].round}`));
+    if (best) { climberId = best.id; cards.push(card('🚀', 'Biggest climber', nm(best.id), `up ${best.d} place${best.d > 1 ? 's' : ''} since round ${prog[0].round}`)); }
     else {
       const winner = lastStep.order[0];
       if (prog.every(s => s.order[0] === winner)) cards.push(card('🏁', 'Wire to wire', nm(winner), `top of the table from round ${prog[0].round} on`));
@@ -2818,6 +2819,45 @@ function statHighlightsHTML(t, st, prog) {
       if (cf === null || gap < cf.gap) cf = { gap, a: played[i - 1].player.id, b: played[i].player.id };
     }
     if (cf) cards.push(card('⚔️', 'Closest finish', `${nm(cf.a)} vs ${nm(cf.b)}`, cf.gap === 0 ? `dead level on ${scoreUnit(t.config)}` : `just ${cf.gap} ${t.config.scoring === 'games' ? 'game' : 'pt'}${cf.gap > 1 ? 's' : ''} apart`));
+  }
+
+  // late bloomer = biggest rank climb over the final stretch. Distinct from the
+  // whole-tournament climber above: it reads only the *end* of the table, where
+  // ranks have settled (so it isn't round-1 noise) and where a player near the
+  // bottom has the most room to climb — surfacing a late surge / great escape
+  // rather than a podium echo. Deduped against the climber so they never collide.
+  if (prog.length >= 4) {
+    const W = prog.length >= 5 ? 3 : 2;            // final stretch = last 3 rounds (2 if short)
+    const startStep = prog[prog.length - 1 - W], endStep = prog[prog.length - 1];
+    const ordinal = n => { const v = n % 100, s = ['th', 'st', 'nd', 'rd']; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+    const climbers = [];
+    for (const s of st) {
+      if (s.played <= 0) continue;
+      const pid = s.player.id, sr = startStep.rank[pid], er = endStep.rank[pid];
+      if (sr == null || er == null) continue;
+      const gain = sr - er;                        // + = climbed up the table over the window
+      if (gain >= 2) climbers.push({ id: pid, gain, from: sr + 1, to: er + 1 });
+    }
+    climbers.sort((a, b) => b.gain - a.gain);
+    const lb = climbers.find(c => c.id !== climberId);
+    if (lb) {
+      // did the surge come from winning out? count their results in the window rounds
+      let lbWon = 0, lbPlayed = 0;
+      for (const step of prog.slice(prog.length - W)) {
+        for (const m of t.rounds[step.round - 1].matches) {
+          if (m.scoreA === null || m.scoreB === null) continue;
+          const inA = m.teamA.includes(lb.id), inB = m.teamB.includes(lb.id);
+          if (!inA && !inB) continue;
+          lbPlayed++;
+          if ((inA ? m.scoreA : m.scoreB) > (inA ? m.scoreB : m.scoreA)) lbWon++;
+          break;
+        }
+      }
+      const sub = (lbPlayed > 0 && lbWon === lbPlayed)
+        ? `won the last ${lbWon} to climb from ${ordinal(lb.from)} to ${ordinal(lb.to)}`
+        : `up ${lb.gain} place${lb.gain > 1 ? 's' : ''} in the final ${W} rounds`;
+      cards.push(card('🌱', 'Late bloomer', nm(lb.id), sub));
+    }
   }
 
   if (!cards.length) return '';
