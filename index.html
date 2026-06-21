@@ -1277,7 +1277,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v28 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v29 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -3061,18 +3061,29 @@ function renderResults() {
    or the live tournament, so opening a share link can't disturb the visitor's own
    in-progress game. */
 function renderSharedView(snap) {
+  const st = Engine.standings(snap);
+  const [p1, p2, p3] = st;
   const dateStr = snap.createdAt ? new Date(snap.createdAt).toLocaleDateString() : '';
   const fmt = snap.config.format === 'mexicano' ? 'Mexicano' : 'Americano';
   const played = snap.rounds.filter(r => Engine.anyScores(r)).length;
+  const colors = ['#cdf545', '#5fd4f5', '#f5b945', '#f56960', '#e8edf2'];
+  const confetti = Array.from({ length: 40 }, (_, i) =>
+    `<div class="confetti" style="left:${Math.random() * 100}%;background:${colors[i % colors.length]};animation-delay:${(Math.random() * 1.2).toFixed(2)}s;transform:rotate(${Math.random() * 360}deg)"></div>`).join('');
   app.innerHTML = `
   <div class="screen">
     <div class="content" style="padding-top:24px">
       <div class="results-inner">
-        <div style="display:inline-block;background:var(--lime);color:#15200a;font-weight:800;font-size:.66rem;letter-spacing:.08em;padding:5px 11px;border-radius:999px;margin-bottom:12px">👁 READ-ONLY · SHARED RESULTS</div>
-        <h2 style="margin:0 0 4px">${esc(snap.config.name)}</h2>
-        <div class="sub">${dateStr ? esc(dateStr) + ' · ' : ''}${fmt} · ${played} round${played === 1 ? '' : 's'} played</div>
-
-        <div class="field-label" style="margin-top:18px">Final standings</div>
+        <div style="display:inline-block;background:var(--lime);color:#15200a;font-weight:800;font-size:.66rem;letter-spacing:.08em;padding:5px 11px;border-radius:999px;margin-bottom:6px">👁 READ-ONLY · SHARED RESULTS</div>
+        <div class="podium-wrap">
+          ${confetti}
+          <h2>Final standings</h2>
+          <div class="sub">${esc(snap.config.name)} · ${fmt} · ${played} round${played === 1 ? '' : 's'}${dateStr ? ' · ' + esc(dateStr) : ''}</div>
+          <div class="podium">
+            ${p2 ? `<div class="pod p2"><div class="pname">${esc(p2.player.name)}</div><div class="ppts">${Math.round(p2.points)} ${scoreUnit(snap.config)}</div><div class="block">2</div></div>` : ''}
+            ${p1 ? `<div class="pod p1"><div class="pname">${esc(p1.player.name)}</div><div class="ppts">${Math.round(p1.points)} ${scoreUnit(snap.config)}</div><div class="block">1</div></div>` : ''}
+            ${p3 ? `<div class="pod p3"><div class="pname">${esc(p3.player.name)}</div><div class="ppts">${Math.round(p3.points)} ${scoreUnit(snap.config)}</div><div class="block">3</div></div>` : ''}
+          </div>
+        </div>
         ${standingsTableHTML(snap)}
         ${scoreViewsHTML(snap)}
         ${roundByRoundHTML(snap)}
