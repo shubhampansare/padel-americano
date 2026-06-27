@@ -73,6 +73,34 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
   ~110k random mid-tournament operations finds zero changes to any played/current round.)
 - Mexicano: rounds drawn lazily (pairings depend on live standings: 1st+4th vs 2nd+3rd per
   court); skill badges have no role in Mexicano.
+- Fixed-pairs (Team) Americano (v31): `config.fixedPairs` (default/absent = false ⇒ classic
+  individual mode, byte-for-byte unchanged — the engine's 14k-assertion suite has zero churn).
+  An Americano sub-mode: **partners are frozen** and the **team** (a fixed pair) is the unit of
+  competition. `t.teams = [{id, players:[pidA,pidB]}]`; players still live in `t.players` and a
+  team is active iff both its players are. Matches keep the player-level shape
+  (`teamA:[pid,pid]`), so scoring/snapshots/replay/`historyCounts` are untouched. The matcher
+  only chooses **which teams face which** (`bestTeamMatchups`, exhaustive over ≤12 playing teams,
+  cost = `1000·faced²` team-vs-team rematch — dominates skill — `+ 40·over²` team-skill where
+  team strength = sum of its two players) and **which whole teams sit out** (`pickRestingTeams`,
+  mirrors `pickResters`: no consecutive team sit-outs, team games spread ≤1, score-independent).
+  `generateRound` branches on `fixedPairs`; `refillPlanned`/`redrawFuture`/`setPlannedRounds`/
+  `regenerateRound` are reused as-is (fixed pairs IS `format:'americano'`) — only the best-of-N
+  quality metric switches via `scheduleRepeats` (team-faced repeats vs partner repeats). Team
+  standings/score-views are added (`teamStandings`/`teamProgression`/`teamHeadToHead`); the
+  public `standings`/`progression`/`headToHead` **delegate** to them when `fixedPairs`, with
+  `standings` reshaping team rows into the `{player:{id,name,active},…}` shape the UI already
+  consumes — so renderers branch only on labels. Roster ops: `addTeam`/`removeTeam`/
+  `reactivateTeam` (keep ≥2 active teams). Setup: a flat player list chunked into team cards
+  (Partners: Rotating·Fixed pairs toggle); start needs ≥`courts×2` teams and **skips the
+  late-arrival check-in** (all teams present at start — `openCheckin`→`commitFixedPairs`).
+  Share link carries `cfg.x` + a teams index array; the read-only shared/replay views rebuild
+  `t.teams` and render team-aware via the same delegation. KNOWN structural edge (mirrors the
+  8p/7-round individual one): when the no-consecutive-sit-out rule forces two alternating groups
+  — e.g. **4 teams/1 court** (max 2 clean rounds), **8 teams/2 courts** (max 6) — opponent
+  variety caps below a full round-robin and a rematch becomes unavoidable past that length;
+  sit-out fairness deliberately wins over opponent variety, same as individual mode. Verified:
+  `tests/fixedpairs.test.cjs` (1173 assertions) + `tests/fuzz/fixedpairs.fuzz.cjs` (≈65k churn
+  steps: 0 immutability violations, partners never split, 0 avoidable rematches on clean draws).
 - Sit-out compensation modes: none | half (fixed N/2) | avg (player's own pts/game,
   recomputed live; legacy `restPoints > 0` config means 'half'). In games mode (below)
   the 'half' base is `gamesTarget/2`, not `pointsPerMatch/2`.
@@ -127,6 +155,9 @@ Free, single-file web app for running padel Americano/Mexicano tournaments. Buil
 ## Parked / backlog
 
 - Pairing features deliberately deferred by user: Mexicano pairing-variant toggle
-  (1+3 vs 2+4 etc.), manual round-1 seeding, fixed-partner mode, mixed-gender flag.
+  (1+3 vs 2+4 etc.), manual round-1 seeding, mixed-gender flag. (Fixed-partner mode
+  shipped in v31 — see the Fixed-pairs invariant above.)
+- Fixed-pairs follow-ups not built in v1: Mexicano fixed-pairs (rank teams, 1v2/3v4),
+  per-team late-arrival check-in, separate team-name labels (teams show as "A & B").
 - Other ideas from competitor research (docs/competitor-research.md): read-only spectator
   link, playoff/final from standings, PDF/CSV export, long-term cross-session rankings.

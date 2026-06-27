@@ -156,6 +156,13 @@ input, select { font-family: inherit; }
 .preset-row input.chipbtn.on { box-shadow: 0 0 18px var(--lime-glow); }
 .setup-note { font-size: .82rem; color: var(--txt-faint); margin-top: 8px; line-height: 1.45; }
 .setup-note b { color: var(--txt-dim); }
+/* fixed-pairs team cards */
+.team-card { background: rgba(255,255,255,.018); border: 1px solid var(--line); border-radius: 14px; padding: 8px 10px 4px; margin-bottom: 12px; animation: fadein .2s ease; }
+.team-card .team-card-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 6px; }
+.team-card .team-tag { font-family: var(--disp); font-weight: 800; text-transform: uppercase; letter-spacing: .04em; font-size: .82rem; color: var(--lime); }
+.team-card .team-card-head .del { width: 32px; height: 30px; border-radius: 8px; color: var(--txt-faint); font-size: 1.05rem; }
+.team-card .team-card-head .del:active { color: var(--red); background: var(--bg2); }
+.team-card .player-row { background: var(--bg1); margin-bottom: 6px; }
 
 /* ============ play screen header ============ */
 .topbar {
@@ -604,6 +611,7 @@ const Engine = (() => {
   'use strict';
 
   const uid = () => 'p' + Math.random().toString(36).slice(2, 9);
+  const tid = () => 'tm' + Math.random().toString(36).slice(2, 9);
 
   function defaultRng() { return Math.random(); }
 
@@ -632,10 +640,43 @@ const Engine = (() => {
       ranking: 'points',            // 'points' | 'wins'
       restMode: 'none',             // sit-out credit: 'none' | 'half' (fixed N/2) | 'avg' (player's own average)
       useSkills: false,             // balance Americano draws by player skill
+      fixedPairs: false,            // fixed-partner Americano: the TEAM (a fixed pair) is the unit
       plannedRounds: 8,
       courtNames: [],
       name: 'Americano',
     }, config || {});
+    cfg.fixedPairs = !!cfg.fixedPairs;
+    if (cfg.pointsPerMatch < 2) throw new Error('Points per match must be at least 2');
+
+    // ---- fixed-pairs: partners are frozen for the whole session ----
+    // Input `teams` is an array of two-player pairs (strings or {name,skill}). Players
+    // still live in t.players (every one arrived+active); t.teams records the fixed pairs.
+    if (cfg.fixedPairs) {
+      const teamsIn = (config && config.teams || [])
+        .map(team => (Array.isArray(team) ? team : (team && team.players) || [])
+          .map(p => (p && typeof p === 'object')
+            ? { name: String(p.name || '').trim(), skill: clampSkill(p.skill) }
+            : { name: String(p).trim(), skill: 2 })
+          .filter(p => p.name))
+        .filter(pair => pair.length === 2);
+      if (teamsIn.length < 2) throw new Error('Need at least 2 teams');
+      const players = [], teams = [];
+      for (const pair of teamsIn) {
+        const tm = { id: tid(), players: [] };
+        for (const p of pair) {
+          const pl = { id: uid(), name: p.name, active: true, arrived: true, skill: p.skill };
+          players.push(pl);
+          tm.players.push(pl.id);
+        }
+        teams.push(tm);
+      }
+      delete cfg.teams; delete cfg.players;
+      return {
+        id: 't' + Date.now().toString(36),
+        createdAt: config && config.createdAt || null,
+        config: cfg, players, teams, rounds: [], finished: false,
+      };
+    }
 
     // players: array of strings, or {name, skill} objects when skill levels are used.
     // `arrived: false` marks a late-arriving player who is on the roster but not yet
@@ -646,7 +687,6 @@ const Engine = (() => {
         : { name: String(p).trim(), skill: 2, arrived: true })
       .filter(p => p.name);
     if (roster.filter(p => p.arrived).length < 4) throw new Error('Need at least 4 players');
-    if (cfg.pointsPerMatch < 2) throw new Error('Points per match must be at least 2');
 
     const t = {
       id: 't' + Date.now().toString(36),
@@ -663,6 +703,39 @@ const Engine = (() => {
 
   function activePlayers(t) { return t.players.filter(p => p.active); }
 
+  // ---- fixed-pairs (team) derived state ----
+  // A team is active iff both its players are active (they always toggle together).
+  function activeTeams(t) {
+    if (!t.teams) return [];
+    const act = new Set(t.players.filter(p => p.active).map(p => p.id));
+    return t.teams.filter(tm => tm.players.every(pid => act.has(pid)));
+  }
+  function teamOf(t, pid) {
+    if (!t.teams) return null;
+    return t.teams.find(tm => tm.players.indexOf(pid) !== -1) || null;
+  }
+  function teamLabel(t, tm) { return tm.players.map(pid => playerName(t, pid)).join(' & '); }
+
+  /** team-level history: how often each pair of teams faced, games played, whole-team rests */
+  function teamHistory(t) {
+    const teams = t.teams || [];
+    const faced = {}, games = {}, rests = {};
+    for (const tm of teams) { games[tm.id] = 0; rests[tm.id] = 0; }
+    const owner = {};
+    for (const tm of teams) for (const pid of tm.players) owner[pid] = tm.id;
+    for (const r of t.rounds) {
+      const restSet = new Set(r.resting);
+      for (const tm of teams) if (tm.players.every(pid => restSet.has(pid))) rests[tm.id]++;
+      for (const m of r.matches) {
+        const A = owner[m.teamA[0]], B = owner[m.teamB[0]];
+        if (A == null || B == null) continue;
+        games[A]++; games[B]++;
+        faced[pairKey(A, B)] = (faced[pairKey(A, B)] || 0) + 1;
+      }
+    }
+    return { faced, games, rests, owner };
+  }
+
   // Late-arrivals: a "pending" player is on the roster but not yet checked in
   // (arrived === false). While any pending player exists, the schedule is capped
   // at PARTIAL_ROUND_CAP rounds — everyone must check in or be removed to go further.
@@ -671,6 +744,10 @@ const Engine = (() => {
   function roundCap(t) { return pendingPlayers(t).length ? PARTIAL_ROUND_CAP : Infinity; }
 
   function courtsUsed(t) {
+    if (t.config.fixedPairs) {
+      const nt = activeTeams(t).length;
+      return Math.max(1, Math.min(t.config.courts, Math.floor(nt / 2)));
+    }
     const n = activePlayers(t).length;
     return Math.max(1, Math.min(t.config.courts, Math.floor(n / 4)));
   }
@@ -837,6 +914,64 @@ const Engine = (() => {
     return best;
   }
 
+  // ---------- pairing (fixed pairs / teams) ----------
+  // Partners are frozen; the matcher only chooses which whole teams sit out and which
+  // teams face which. Mirrors the individual rest/match logic at team granularity.
+
+  function pickRestingTeams(t, rng) {
+    const teams = activeTeams(t);
+    const cu = courtsUsed(t);
+    const need = teams.length - cu * 2;
+    if (need <= 0) return [];
+    const { games, rests } = teamHistory(t);
+    // hard-exclude last round's resting teams when enough others remain
+    const prevRest = new Set();
+    if (t.rounds.length) {
+      const restSet = new Set(t.rounds[t.rounds.length - 1].resting);
+      for (const tm of (t.teams || [])) if (tm.players.every(pid => restSet.has(pid))) prevRest.add(tm.id);
+    }
+    let pool = teams.filter(tm => !prevRest.has(tm.id));
+    if (pool.length < need) pool = teams.slice();
+    const jitter = new Map(pool.map(tm => [tm.id, rng()]));
+    pool.sort((a, b) =>
+      ((games[b.id] || 0) - (games[a.id] || 0)) ||
+      ((rests[a.id] || 0) - (rests[b.id] || 0)) ||
+      (jitter.get(a.id) - jitter.get(b.id)));
+    return pool.slice(0, need);
+  }
+
+  /** Group the playing teams into matches, minimizing team-vs-team rematches (then skill). */
+  function bestTeamMatchups(t, teams, rng) {
+    const { faced } = teamHistory(t);
+    const useSkills = !!t.config.useSkills;
+    const skillSum = {};
+    if (useSkills) {
+      const sk = {}; for (const p of t.players) sk[p.id] = p.skill || 2;
+      for (const tm of (t.teams || [])) skillSum[tm.id] = (sk[tm.players[0]] || 2) + (sk[tm.players[1]] || 2);
+    }
+    const cost = (matchups) => {
+      let c = 0;
+      for (const [x, y] of matchups) {
+        const f = faced[pairKey(x.id, y.id)] || 0;
+        c += 1000 * f * f;                    // rematch weight dominates skill (see CLAUDE.md)
+        if (useSkills) {
+          const over = Math.max(0, Math.abs(skillSum[x.id] - skillSum[y.id]) - 1);
+          c += 40 * over * over;
+        }
+      }
+      return c;
+    };
+    const order = shuffle(teams, rng);        // <= 12 playing teams → exhaustive is cheap
+    let bestCost = Infinity, ties = [];
+    for (const matchups of enumeratePairMatchups(order)) {
+      const cc = cost(matchups);
+      if (cc < bestCost) { bestCost = cc; ties = [matchups]; }
+      else if (cc === bestCost) ties.push(matchups);
+    }
+    const best = ties[Math.floor(rng() * ties.length)];
+    return best.map(([x, y]) => [x.players.slice(), y.players.slice()]);
+  }
+
   // ---------- pairing (mexicano) ----------
 
   function mexicanoMatches(t, ids) {
@@ -861,6 +996,23 @@ const Engine = (() => {
 
   function generateRound(t, rng) {
     rng = rng || defaultRng;
+
+    // fixed-pairs: rest whole teams, then match the playing teams against each other
+    if (t.config.fixedPairs) {
+      if (activeTeams(t).length < 2) throw new Error('Need at least 2 active teams');
+      const restTeams = pickRestingTeams(t, rng);
+      const restIds = new Set(restTeams.map(tm => tm.id));
+      const resting = restTeams.flatMap(tm => tm.players.slice());
+      const playing = activeTeams(t).filter(tm => !restIds.has(tm.id));
+      const matchups = bestTeamMatchups(t, playing, rng);
+      const round = {
+        matches: matchups.map((m, i) => ({ court: i, teamA: m[0], teamB: m[1], scoreA: null, scoreB: null })),
+        resting,
+      };
+      t.rounds.push(round);
+      return round;
+    }
+
     if (activePlayers(t).length < 4) throw new Error('Need at least 4 active players');
     if (t.rounds.length >= PARTIAL_ROUND_CAP && pendingPlayers(t).length) {
       throw new Error('Check everyone in or remove no-shows before round ' + (PARTIAL_ROUND_CAP + 1));
@@ -893,6 +1045,18 @@ const Engine = (() => {
     return extra;
   }
 
+  /** schedule-quality metric for best-of-N: partner repeats (individual) or
+   *  team-vs-team rematches (fixed pairs) — the axis the matcher rotates on. */
+  function scheduleRepeats(t) {
+    if (t.config.fixedPairs) {
+      const { faced } = teamHistory(t);
+      let extra = 0;
+      for (const k in faced) if (faced[k] > 1) extra += faced[k] - 1;
+      return extra;
+    }
+    return partnerRepeatTotal(t);
+  }
+
   // The per-round matcher already minimizes repeats against history, but it's greedy
   // (no lookahead), so an early round can force an avoidable repeat several rounds later
   // — worst with odd/sit-out counts. Drawing the provisional tail a few times and keeping
@@ -906,12 +1070,13 @@ const Engine = (() => {
     if (t.config.format !== 'americano') return;
     const cap = Math.min(t.config.plannedRounds, roundCap(t));
     const prefix = t.rounds;                       // played + current rounds — kept verbatim
-    if (prefix.length >= cap || activePlayers(t).length < 4) return;
+    const enough = () => t.config.fixedPairs ? activeTeams(t).length >= 2 : activePlayers(t).length >= 4;
+    if (prefix.length >= cap || !enough()) return;
     let best = null, bestRep = Infinity;
     for (let k = 0; k < REFILL_TRIES; k++) {
       t.rounds = prefix.slice();                    // restart from the kept prefix each try
-      while (t.rounds.length < cap && activePlayers(t).length >= 4) generateRound(t, rng);
-      const rep = partnerRepeatTotal(t);
+      while (t.rounds.length < cap && enough()) generateRound(t, rng);
+      const rep = scheduleRepeats(t);
       if (rep < bestRep) { bestRep = rep; best = t.rounds; }
       if (rep === 0) break;                         // a clean schedule — stop early
     }
@@ -1007,6 +1172,16 @@ const Engine = (() => {
   // ---------- standings ----------
 
   function standings(t) {
+    // fixed-pairs: delegate to team standings, reshaped into the same row shape the UI
+    // consumes (row.player.{id,name,active}) so every renderer works without branching.
+    if (t.config.fixedPairs) {
+      const act = new Set(t.players.filter(p => p.active).map(p => p.id));
+      return teamStandings(t).map(r => ({
+        player: { id: r.team.id, name: r.name, active: r.team.players.every(pid => act.has(pid)) },
+        points: r.points, played: r.played, wins: r.wins, draws: r.draws, losses: r.losses,
+        pf: r.pf, pa: r.pa, diff: r.diff, rests: r.rests,
+      }));
+    }
     const stats = {};
     for (const p of t.players) {
       if (p.arrived === false) continue; // not yet checked in — no row until they play
@@ -1066,6 +1241,57 @@ const Engine = (() => {
     return rows;
   }
 
+  /** Standings aggregated by team (fixed-pairs mode). One row per team; both members
+   *  always have identical stats, so the team IS the row. Same rest-compensation modes. */
+  function teamStandings(t) {
+    const teams = t.teams || [];
+    const stats = {};
+    for (const tm of teams) {
+      stats[tm.id] = { team: tm, name: teamLabel(t, tm), points: 0, played: 0, wins: 0, draws: 0, losses: 0, pf: 0, pa: 0, diff: 0, rests: 0 };
+    }
+    const owner = {};
+    for (const tm of teams) for (const pid of tm.players) owner[pid] = tm.id;
+    let reached = t.rounds.findIndex((_, i) => !roundComplete(t, i));
+    if (reached === -1) reached = t.rounds.length - 1;
+    for (let ri = 0; ri < t.rounds.length; ri++) {
+      const r = t.rounds[ri];
+      if (ri <= reached) {
+        const restSet = new Set(r.resting);
+        for (const tm of teams) if (tm.players.every(pid => restSet.has(pid)) && stats[tm.id]) stats[tm.id].rests++;
+      }
+      for (const m of r.matches) {
+        if (m.scoreA === null || m.scoreB === null) continue;
+        const A = owner[m.teamA[0]], B = owner[m.teamB[0]];
+        const apply = (id, mine, theirs) => {
+          const s = stats[id];
+          if (!s) return;
+          s.points += mine; s.pf += mine; s.pa += theirs; s.played++;
+          if (mine > theirs) s.wins++; else if (mine === theirs) s.draws++; else s.losses++;
+        };
+        apply(A, m.scoreA, m.scoreB);
+        apply(B, m.scoreB, m.scoreA);
+      }
+    }
+    const rows = Object.values(stats);
+    const mode = (t.config.restMode && t.config.restMode !== 'none')
+      ? t.config.restMode
+      : (t.config.restPoints > 0 ? 'half' : 'none');
+    const half = t.config.scoring === 'games'
+      ? (t.config.gamesTarget || 4) / 2
+      : Math.floor((t.config.pointsPerMatch || 24) / 2);
+    for (const s of rows) {
+      s.diff = s.pf - s.pa;
+      if (mode === 'half') s.points += s.rests * half;
+      else if (mode === 'avg') s.points += s.rests * (s.played ? s.pf / s.played : half);
+    }
+    const byPoints = (x, y) =>
+      (y.points - x.points) || (y.diff - x.diff) || (y.wins - x.wins) || x.name.localeCompare(y.name);
+    const byWins = (x, y) =>
+      (y.wins - x.wins) || (y.points - x.points) || (y.diff - x.diff) || x.name.localeCompare(y.name);
+    rows.sort(t.config.ranking === 'wins' ? byWins : byPoints);
+    return rows;
+  }
+
   // ---------- score views (read-only analytics) ----------
 
   /**
@@ -1075,6 +1301,7 @@ const Engine = (() => {
    * rank:{pid:index}, points:{pid:pts} }. Pure — never mutates t.
    */
   function progression(t) {
+    if (t.config.fixedPairs) return teamProgression(t);
     const steps = [];
     for (let ri = 0; ri < t.rounds.length; ri++) {
       if (!anyScores(t.rounds[ri])) continue;
@@ -1088,6 +1315,20 @@ const Engine = (() => {
     return steps;
   }
 
+  /** progression() but keyed by team (fixed-pairs mode). */
+  function teamProgression(t) {
+    const steps = [];
+    for (let ri = 0; ri < t.rounds.length; ri++) {
+      if (!anyScores(t.rounds[ri])) continue;
+      const partial = { players: t.players, teams: t.teams, config: t.config, rounds: t.rounds.slice(0, ri + 1) };
+      const st = teamStandings(partial);
+      const rank = {}, points = {};
+      st.forEach((s, i) => { rank[s.team.id] = i; points[s.team.id] = s.points; });
+      steps.push({ round: ri + 1, order: st.map(s => s.team.id), rank, points });
+    }
+    return steps;
+  }
+
   /**
    * Opponent head-to-head records. Americano rotates partners, so "vs" means
    * being on the opposing team. Returns { [pid]: { [oid]: {faced, wins, losses,
@@ -1095,6 +1336,7 @@ const Engine = (() => {
    * matches. net[a][b] === −net[b][a]; faced is symmetric. Pure.
    */
   function headToHead(t) {
+    if (t.config.fixedPairs) return teamHeadToHead(t);
     const h2h = {};
     for (const p of t.players) h2h[p.id] = {};
     const bump = (a, b, mine, theirs) => {
@@ -1114,6 +1356,30 @@ const Engine = (() => {
     return h2h;
   }
 
+  /** headToHead() but team-vs-team (fixed-pairs mode). */
+  function teamHeadToHead(t) {
+    const teams = t.teams || [];
+    const h2h = {};
+    for (const tm of teams) h2h[tm.id] = {};
+    const owner = {};
+    for (const tm of teams) for (const pid of tm.players) owner[pid] = tm.id;
+    const bump = (a, b, mine, theirs) => {
+      const rec = h2h[a][b] || (h2h[a][b] = { faced: 0, wins: 0, losses: 0, draws: 0, net: 0 });
+      rec.faced++; rec.net += mine - theirs;
+      if (mine > theirs) rec.wins++; else if (mine === theirs) rec.draws++; else rec.losses++;
+    };
+    for (const r of t.rounds) {
+      for (const m of r.matches) {
+        if (m.scoreA === null || m.scoreB === null) continue;
+        const A = owner[m.teamA[0]], B = owner[m.teamB[0]];
+        if (A == null || B == null) continue;
+        bump(A, B, m.scoreA, m.scoreB);
+        bump(B, A, m.scoreB, m.scoreA);
+      }
+    }
+    return h2h;
+  }
+
   // ---------- roster changes ----------
   // every change that affects fairness or balance redraws the unplayed rounds
 
@@ -1125,6 +1391,40 @@ const Engine = (() => {
     t.players.push(p);
     redrawFuture(t, rng);
     return p;
+  }
+
+  /** Add a fixed pair mid-tournament. `names` is [name1, name2]; future rounds redraw. */
+  function addTeam(t, names, rng, skills) {
+    if (!t.teams) throw new Error('Not a fixed-pairs tournament');
+    const pair = (names || []).map(n => String(n).trim()).filter(Boolean);
+    if (pair.length !== 2) throw new Error('A team needs two players');
+    const tm = { id: tid(), players: [] };
+    pair.forEach((name, i) => {
+      const p = { id: uid(), name, active: true, arrived: true, skill: clampSkill(skills && skills[i]) };
+      t.players.push(p);
+      tm.players.push(p.id);
+    });
+    t.teams.push(tm);
+    redrawFuture(t, rng);
+    return tm;
+  }
+
+  /** Deactivate a fixed pair: kept in standings, excluded from future rounds. */
+  function removeTeam(t, teamId, rng) {
+    const tm = (t.teams || []).find(x => x.id === teamId);
+    if (!tm) throw new Error('No such team');
+    const isActive = activeTeams(t).some(x => x.id === teamId);
+    if (isActive && activeTeams(t).length <= 2) throw new Error('Need at least 2 active teams');
+    for (const pid of tm.players) { const p = t.players.find(x => x.id === pid); if (p) p.active = false; }
+    redrawFuture(t, rng);
+  }
+
+  /** Bring a removed fixed pair back: rejoins from the next draw. */
+  function reactivateTeam(t, teamId, rng) {
+    const tm = (t.teams || []).find(x => x.id === teamId);
+    if (!tm) throw new Error('No such team');
+    for (const pid of tm.players) { const p = t.players.find(x => x.id === pid); if (p) p.active = true; }
+    redrawFuture(t, rng);
   }
 
   function setSkill(t, pid, skill, rng) {
@@ -1203,6 +1503,8 @@ const Engine = (() => {
     markArrived, removeNoShow, pendingPlayers, PARTIAL_ROUND_CAP,
     renamePlayer, setCourts, setSkill, activePlayers,
     courtsUsed, historyCounts, playerName, anyScores,
+    activeTeams, teamOf, teamLabel, teamHistory, teamStandings, teamProgression, teamHeadToHead,
+    addTeam, removeTeam, reactivateTeam,
   };
 })();
 /*ENGINE-END*/
@@ -1277,7 +1579,7 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const BUILD = 'v30 · 21 Jun 2026'; // bump on every shipped change — confirms which build a device runs
+const BUILD = 'v31 · 27 Jun 2026'; // bump on every shipped change — confirms which build a device runs
 
 const footerHTML = () => `
   <div class="footer">
@@ -1344,6 +1646,7 @@ function defaultSetup() {
     players,
     skills: players.map(n => lastSk[String(n).toLowerCase()] || 2),
     useSkills: store.lastUseSkills(),
+    fixedPairs: false,
     restMode: 'none',
     courts: 2,
     format: 'americano',
@@ -1366,12 +1669,43 @@ function suggestedRounds(s) {
   return Math.max(2, Math.round(s.durationMin / perRound));
 }
 
+function completeTeams(s) {
+  let n = 0;
+  for (let i = 0; i + 1 < s.players.length; i += 2) if (s.players[i].trim() && s.players[i + 1].trim()) n++;
+  return n;
+}
+
+// fixed-pairs roster: the flat player list is chunked into team cards of two rows.
+function teamCardsHTML(s) {
+  const nTeams = Math.ceil(s.players.length / 2);
+  let html = '';
+  for (let ti = 0; ti < nTeams; ti++) {
+    html += `<div class="team-card"><div class="team-card-head"><span class="team-tag">Team ${ti + 1}</span>${nTeams > 2 ? `<button class="del" data-delteam="${ti}" aria-label="Remove team">✕</button>` : ''}</div>`;
+    for (let k = 0; k < 2; k++) {
+      const i = ti * 2 + k;
+      if (i >= s.players.length) break;
+      html += `<div class="player-row">
+        <span class="pnum">${k === 0 ? 'A' : 'B'}</span>
+        <input data-pi="${i}" value="${esc(s.players[i] || '')}" placeholder="Player ${k === 0 ? 'A' : 'B'}" autocomplete="off" enterkeyhint="next">
+        ${s.useSkills ? `<button class="skill-badge sk${s.skills[i] || 2}" data-sk="${i}">${SKILL_GLYPH[s.skills[i] || 2]}</button>` : ''}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  return html;
+}
+
 function renderSetup() {
   const s = setupState;
+  const fixed = s.format === 'americano' && s.fixedPairs;
   const filled = s.players.filter(n => n.trim()).length;
-  const maxCourts = Math.max(1, Math.floor(Math.max(filled, 4) / 4));
+  const teams = completeTeams(s);
+  // a "unit" is a player (rotating) or a whole team (fixed pairs)
+  const units = fixed ? teams : filled;
+  const perCourt = fixed ? 2 : 4;
+  const maxCourts = Math.max(1, Math.floor(Math.max(units, fixed ? 2 : 4) / perCourt));
   const usedCourts = Math.min(s.courts, maxCourts);
-  const resting = Math.max(0, filled - usedCourts * 4);
+  const resting = Math.max(0, units - usedCourts * perCourt);
   const rounds = s.plannedRounds || suggestedRounds(s);
   const presets = [16, 21, 24, 32];
   const gamePresets = [3, 4, 5, 6];
@@ -1392,21 +1726,30 @@ function renderSetup() {
         <button data-v="americano" class="${s.format === 'americano' ? 'on lime' : ''}">Americano</button>
         <button data-v="mexicano" class="${s.format === 'mexicano' ? 'on lime' : ''}">Mexicano</button>
       </div>
-      <div class="setup-note">${s.format === 'americano'
-        ? '<b>Americano:</b> new partner every round — fair mix, everyone plays with everyone. The full schedule is drawn upfront.'
-        : '<b>Mexicano:</b> round 1 random, then each draw follows the live standings (1st+4th vs 2nd+3rd per court) for even matches — so rounds appear one at a time.'}</div>
+      <div class="setup-note">${s.format !== 'americano'
+        ? '<b>Mexicano:</b> round 1 random, then each draw follows the live standings (1st+4th vs 2nd+3rd per court) for even matches — so rounds appear one at a time.'
+        : fixed
+          ? '<b>Team Americano:</b> partners are fixed for the whole session — each pair keeps their partner and rotates opponents. Standings are by team.'
+          : '<b>Americano:</b> new partner every round — fair mix, everyone plays with everyone. The full schedule is drawn upfront.'}</div>
+      ${s.format === 'americano' ? `
+      <div class="seg" id="seg-partners" style="margin-top:10px">
+        <button data-v="0" class="${!s.fixedPairs ? 'on' : ''}">Rotating partners</button>
+        <button data-v="1" class="${s.fixedPairs ? 'on' : ''}">Fixed pairs</button>
+      </div>` : ''}
       </div>
 
       <div class="setup-players">
-      <div class="field-label">Players <span class="hint">${filled} entered ${filled >= s.courts * 4 ? '' : `(need ${s.courts * 4} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}</span></div>
+      <div class="field-label">${fixed ? 'Teams' : 'Players'} <span class="hint">${fixed
+        ? `${teams} team${teams === 1 ? '' : 's'} ${teams >= s.courts * 2 ? '' : `(need ${s.courts * 2} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}`
+        : `${filled} entered ${filled >= s.courts * 4 ? '' : `(need ${s.courts * 4} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}`}</span></div>
       ${s.format === 'americano' ? `
       <div class="seg" id="seg-skillmode" style="margin-bottom:10px">
         <button data-v="0" class="${!s.useSkills ? 'on' : ''}">No skill levels</button>
         <button data-v="1" class="${s.useSkills ? 'on' : ''}">Skill levels</button>
       </div>
-      ${s.useSkills ? `<div class="setup-note" style="margin:0 0 10px">Tap a player’s badge to cycle — <b style="color:var(--lime)">+</b> stronger · <b>•</b> middle · <b style="color:var(--amber)">−</b> weaker, relative to your group. Draws then avoid lopsided matches (the strongest two never gang up on the weakest two).</div>` : ''}` : ''}
+      ${s.useSkills ? `<div class="setup-note" style="margin:0 0 10px">Tap a player’s badge to cycle — <b style="color:var(--lime)">+</b> stronger · <b>•</b> middle · <b style="color:var(--amber)">−</b> weaker, relative to your group. ${fixed ? 'A team’s strength is its two players combined; draws avoid lopsided team-vs-team games.' : 'Draws then avoid lopsided matches (the strongest two never gang up on the weakest two).'}</div>` : ''}` : ''}
       <div id="player-list">
-        ${s.players.map((n, i) => `
+        ${fixed ? teamCardsHTML(s) : s.players.map((n, i) => `
           <div class="player-row">
             <span class="pnum">${i + 1}</span>
             <input data-pi="${i}" value="${esc(n)}" placeholder="Player name" autocomplete="off" enterkeyhint="next">
@@ -1414,11 +1757,11 @@ function renderSetup() {
             <button class="del" data-del="${i}" aria-label="Remove">✕</button>
           </div>`).join('')}
       </div>
-      <button class="btn btn-ghost btn-block" id="add-player-row">+ Add player</button>
+      <button class="btn btn-ghost btn-block" id="add-player-row">${fixed ? '+ Add team' : '+ Add player'}</button>
       </div>
 
       <div class="setup-settings">
-      <div class="field-label">Courts <span class="hint">${filled >= 4 ? `${usedCourts} used · ${resting} sit out per round` : ''}</span></div>
+      <div class="field-label">Courts <span class="hint">${units >= (fixed ? 2 : 4) ? `${usedCourts} used · ${resting}${fixed ? ` team${resting === 1 ? '' : 's'}` : ''} sit out per round` : ''}</span></div>
       <div class="stepper" id="courts-stepper">
         <button data-step="-1">−</button>
         <div class="stepper-val">${s.courts}</div>
@@ -1484,16 +1827,17 @@ function renderSetup() {
         <button data-step="1">+</button>
       </div>
       <div class="setup-note">${(() => {
-        if (filled < 4) return '';
-        const gp = rounds * 4 * usedCourts / filled;
+        if (units < (fixed ? 2 : 4)) return '';
+        const gp = rounds * perCourt * usedCourts / units;
         const lo = Math.floor(gp), hi = Math.ceil(gp);
-        return `<b>≈ ${lo === hi ? lo : lo + '–' + hi} ${isGames ? 'matches' : 'games'} per player.</b> `;
-      })()}You can always add extra rounds while playing. Rounds are drawn one at a time, so players can join or leave mid-session.</div>
+        const who = fixed ? 'team' : 'player';
+        return `<b>≈ ${lo === hi ? lo : lo + '–' + hi} ${isGames ? 'matches' : 'games'} per ${who}.</b> `;
+      })()}You can always add extra rounds while playing.${fixed ? ' You can add or remove a whole team mid-session.' : ' Rounds are drawn one at a time, so players can join or leave mid-session.'}</div>
       </div>
 
       <div class="setup-footer">
       <div style="margin-top:28px">
-        <button class="btn btn-primary btn-block" id="start-btn" ${filled >= s.courts * 4 ? '' : 'disabled'} style="font-size:1.25rem;padding:18px">Start tournament</button>
+        <button class="btn btn-primary btn-block" id="start-btn" ${(fixed ? teams >= s.courts * 2 : filled >= s.courts * 4) ? '' : 'disabled'} style="font-size:1.25rem;padding:18px">Start tournament</button>
       </div>
       ${store.history().length ? '<button class="btn btn-ghost btn-block" id="show-history" style="margin-top:10px">Past tournaments</button>' : ''}
       <button class="btn btn-ghost btn-block" id="setup-help" style="margin-top:10px">Rules &amp; help</button>
@@ -1522,7 +1866,24 @@ function renderSetup() {
     if (s.players.length === 0) { s.players.push(''); s.skills.push(2); }
     renderSetup();
   }));
-  $('#add-player-row').addEventListener('click', () => { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); });
+  app.querySelectorAll('[data-delteam]').forEach(b => b.addEventListener('click', e => {
+    const ti = +e.currentTarget.dataset.delteam;
+    s.players.splice(ti * 2, 2);
+    s.skills.splice(ti * 2, 2);
+    while (s.players.length < 4) { s.players.push(''); s.skills.push(2); }
+    renderSetup();
+  }));
+  $('#add-player-row').addEventListener('click', () => {
+    if (fixed) { s.players.push('', ''); s.skills.push(2, 2); renderSetup(); focusPlayer(s.players.length - 2); }
+    else { s.players.push(''); s.skills.push(2); renderSetup(); focusPlayer(s.players.length - 1); }
+  });
+  const sep = $('#seg-partners');
+  if (sep) sep.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    s.fixedPairs = b.dataset.v === '1';
+    // fixed pairs needs an even roster (≥2 teams) — pad to a clean grid
+    if (s.fixedPairs) { while (s.players.length < 4) { s.players.push(''); s.skills.push(2); } if (s.players.length % 2) { s.players.push(''); s.skills.push(2); } }
+    renderSetup();
+  }));
   const skm = $('#seg-skillmode');
   if (skm) skm.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     s.useSkills = b.dataset.v === '1';
@@ -1583,6 +1944,14 @@ function renderSetup() {
     if (el) el.focus();
   }
   function updateSetupMeta() {
+    if (fixed) {
+      const tms = completeTeams(s);
+      const need = s.courts * 2;
+      $('#start-btn').toggleAttribute('disabled', tms < need);
+      const hint = app.querySelector('.field-label .hint');
+      if (hint) hint.textContent = `${tms} team${tms === 1 ? '' : 's'} ${tms >= need ? '' : `(need ${need} for ${s.courts} court${s.courts > 1 ? 's' : ''})`}`;
+      return;
+    }
     const f = s.players.filter(n => n.trim()).length;
     const need = s.courts * 4;
     $('#start-btn').toggleAttribute('disabled', f < need);
@@ -1598,6 +1967,8 @@ function renderSetup() {
 // pending, joining the draw once checked in (see openReadinessSheet during play).
 function openCheckin() {
   const s = setupState;
+  // Fixed pairs: everyone is present at start (no late-arrival check-in) — go straight in.
+  if (s.format === 'americano' && s.fixedPairs) { commitFixedPairs(); return; }
   const roster = s.players.map((n, i) => ({ name: n.trim(), skill: s.skills[i] || 2 })).filter(r => r.name);
   const lower = roster.map(r => r.name.toLowerCase());
   if (new Set(lower).size !== lower.length) { toast('Player names must be unique', true); return; }
@@ -1605,6 +1976,48 @@ function openCheckin() {
   if (roster.length < need) { toast(`Need ${need} players for ${s.courts} court${s.courts > 1 ? 's' : ''}`, true); return; }
   checkin = { roster, ready: roster.map(() => false) };
   render();
+}
+
+// Build the team roster from consecutive complete pairs and start immediately.
+function commitFixedPairs() {
+  const s = setupState;
+  const teams = [], allNames = [], skillsByName = {};
+  for (let i = 0; i + 1 < s.players.length; i += 2) {
+    const a = s.players[i].trim(), b = s.players[i + 1].trim();
+    if (!a || !b) continue;
+    const ska = s.skills[i] || 2, skb = s.skills[i + 1] || 2;
+    teams.push([{ name: a, skill: ska }, { name: b, skill: skb }]);
+    allNames.push(a, b);
+    skillsByName[a.toLowerCase()] = ska; skillsByName[b.toLowerCase()] = skb;
+  }
+  const lower = allNames.map(n => n.toLowerCase());
+  if (new Set(lower).size !== lower.length) { toast('Player names must be unique', true); return; }
+  if (teams.length < s.courts * 2) { toast(`Need ${s.courts * 2} teams for ${s.courts} court${s.courts > 1 ? 's' : ''}`, true); return; }
+  const ok = mutate(() => {
+    T = Engine.createTournament({
+      fixedPairs: true,
+      teams,
+      useSkills: s.useSkills,
+      restMode: s.restMode,
+      courts: s.courts,
+      format: 'americano',
+      scoring: s.scoring,
+      pointsPerMatch: s.pointsPerMatch,
+      gamesTarget: s.gamesTarget,
+      scoreEntry: s.scoring === 'games' ? 'free' : s.scoreEntry,
+      ranking: s.ranking,
+      plannedRounds: s.plannedRounds || suggestedRounds(s),
+      durationMin: s.durationMin,
+      createdAt: Date.now(),
+    });
+    T.config.durationMin = s.durationMin;
+    Engine.refillPlanned(T); // pre-draw the full schedule
+    store.saveLastPlayers(allNames, skillsByName, s.useSkills);
+    checkin = null;
+    tab = 'rounds';
+    viewRound = 0;
+  });
+  if (!ok) { T = null; }
 }
 
 function renderReadiness() {
@@ -1974,7 +2387,7 @@ function renderStandingsTab() {
     <div class="pane-title">Standings</div>
     <table class="stand-table">
       <thead><tr>
-        <th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}
+        <th></th><th>${T.config.fixedPairs ? 'Team' : 'Player'}</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}
       </tr></thead>
       <tbody>
         ${st.map((s, i) => {
@@ -2227,7 +2640,7 @@ function openMenuSheet() {
     <div class="grab"></div>
     <h3>Menu</h3>
     <div class="menu-list">
-      <button class="btn" id="mi-players"><span class="ico">👥</span>Players (add / edit / remove)</button>
+      <button class="btn" id="mi-players"><span class="ico">👥</span>${T.config.fixedPairs ? 'Teams (add / edit / remove)' : 'Players (add / edit / remove)'}</button>
       <button class="btn" id="mi-settings"><span class="ico">⚙️</span>Settings (courts, timer, scoring)</button>
       <button class="btn" id="mi-tv"><span class="ico">📺</span>TV mode (big screen)</button>
       <button class="btn" id="mi-share"><span class="ico">📋</span>Copy standings</button>
@@ -2237,7 +2650,7 @@ function openMenuSheet() {
       <button class="btn" id="mi-finish"><span class="ico">🏆</span>Finish tournament</button>
       <button class="btn btn-danger" id="mi-abandon"><span class="ico">🗑</span>Abandon (no winner)</button>
     </div>`);
-  ov.querySelector('#mi-players').addEventListener('click', () => { closeSheet(); openPlayersSheet(); });
+  ov.querySelector('#mi-players').addEventListener('click', () => { closeSheet(); (T.config.fixedPairs ? openTeamsSheet : openPlayersSheet)(); });
   ov.querySelector('#mi-settings').addEventListener('click', () => { closeSheet(); openSettingsSheet(); });
   ov.querySelector('#mi-tv').addEventListener('click', () => { closeSheet(); openTvMode(); });
   ov.querySelector('#mi-share').addEventListener('click', () => { copyStandings(); closeSheet(); });
@@ -2341,6 +2754,87 @@ function openPlayersSheet(editPid) {
     mutate(() => Engine.addPlayer(T, name));
     toast(name + ' joins from the next draw');
     openPlayersSheet();
+  });
+}
+
+/** Fixed-pairs roster management: rename players, cycle skill, remove/rejoin or add whole teams. */
+function openTeamsSheet(editPid) {
+  const st = Engine.standings(T);            // team-shaped rows (player.id === team id)
+  const byTeam = {};
+  st.forEach(s => { byTeam[s.player.id] = s; });
+  const skillsOn = T.config.useSkills;
+  const activeCount = Engine.activeTeams(T).length;
+  const teamRowHTML = (tm, ti) => {
+    const players = tm.players.map(pid => T.players.find(x => x.id === pid));
+    const active = players.every(p => p && p.active);
+    const row = byTeam[tm.id];
+    const stat = row ? `${Math.round(row.points)} ${scoreUnit(T.config)} · ${row.played} ${T.config.scoring === 'games' ? 'matches' : 'games'} · ${row.rests} rests` : '';
+    const memberHTML = p => p.id === editPid
+      ? `<div class="player-row"><span class="pnum">•</span><input id="pl-edit" value="${esc(p.name)}" autocomplete="off" enterkeyhint="done"><button class="del" id="pl-save" style="color:var(--lime)">✓</button></div>`
+      : `<div class="player-row"><span class="pnum">•</span><div style="flex:1;min-width:0;font-weight:600">${esc(p.name)}</div>${skillsOn ? `<button class="skill-badge sk${p.skill || 2}" data-skp="${p.id}">${SKILL_GLYPH[p.skill || 2]}</button>` : ''}<button class="del" data-ed="${p.id}">✎</button></div>`;
+    return `<div class="team-card" style="${active ? '' : 'opacity:.55'}">
+      <div class="team-card-head">
+        <span class="team-tag">Team ${ti + 1}${active ? '' : ' (left)'}</span>
+        ${active
+          ? (activeCount > 2 ? `<button class="del" data-rmteam="${tm.id}">✕</button>` : '')
+          : `<button class="del" data-rjteam="${tm.id}" style="color:var(--lime);font-size:.9rem;width:auto;padding:0 12px">↩ rejoin</button>`}
+      </div>
+      ${players.map(memberHTML).join('')}
+      <div class="pstat" style="padding:2px 6px 4px;color:var(--txt-faint);font-size:.78rem">${stat}</div>
+    </div>`;
+  };
+  const ov = sheet(`
+    <div class="grab"></div>
+    <h3>Teams</h3>
+    <div class="sub">Rename a player ✎, cycle skill, remove a whole team ✕ (results kept, can rejoin), or add a team below. Changes apply from the next draw.</div>
+    <div class="proster">${T.teams.map(teamRowHTML).join('')}</div>
+    <div class="team-card" style="margin-top:10px">
+      <div class="team-card-head"><span class="team-tag">Add team</span></div>
+      <div class="player-row"><span class="pnum">A</span><input id="np-a" placeholder="Player A" autocomplete="off"></div>
+      <div class="player-row"><span class="pnum">B</span><input id="np-b" placeholder="Player B" autocomplete="off"><button class="del" id="np-add" style="color:var(--lime);font-size:1.5rem">+</button></div>
+    </div>`);
+  ov.querySelectorAll('[data-rmteam]').forEach(b => b.addEventListener('click', () => {
+    const tm = T.teams.find(x => x.id === b.dataset.rmteam);
+    confirmSheet(`Remove ${Engine.teamLabel(T, tm)}?`, 'They keep their points and can rejoin later from this list.', 'Remove', () => {
+      mutate(() => Engine.removeTeam(T, tm.id));
+      openTeamsSheet();
+    });
+  }));
+  ov.querySelectorAll('[data-rjteam]').forEach(b => b.addEventListener('click', () => {
+    const tm = T.teams.find(x => x.id === b.dataset.rjteam);
+    mutate(() => Engine.reactivateTeam(T, tm.id));
+    toast(Engine.teamLabel(T, tm) + ' rejoins from the next draw');
+    openTeamsSheet();
+  }));
+  ov.querySelectorAll('[data-ed]').forEach(b => b.addEventListener('click', () => openTeamsSheet(b.dataset.ed)));
+  ov.querySelectorAll('[data-skp]').forEach(b => b.addEventListener('click', () => {
+    const p = T.players.find(x => x.id === b.dataset.skp);
+    mutate(() => Engine.setSkill(T, p.id, nextSkill(p.skill || 2)));
+    openTeamsSheet();
+  }));
+  const editInp = ov.querySelector('#pl-edit');
+  if (editInp) {
+    const commit = () => {
+      const v = editInp.value.trim();
+      const p = T.players.find(x => x.id === editPid);
+      if (v && v !== p.name) {
+        if (T.players.some(x => x.id !== editPid && x.name.toLowerCase() === v.toLowerCase())) { toast('Name already in use', true); return; }
+        mutate(() => Engine.renamePlayer(T, editPid, v));
+      }
+      openTeamsSheet();
+    };
+    editInp.focus(); editInp.select();
+    ov.querySelector('#pl-save').addEventListener('click', commit);
+    editInp.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') openTeamsSheet(); });
+  }
+  ov.querySelector('#np-add').addEventListener('click', () => {
+    const a = ov.querySelector('#np-a').value.trim(), b = ov.querySelector('#np-b').value.trim();
+    if (!a || !b) { toast('Enter both players', true); return; }
+    const lower = T.players.map(p => p.name.toLowerCase());
+    if (lower.includes(a.toLowerCase()) || lower.includes(b.toLowerCase()) || a.toLowerCase() === b.toLowerCase()) { toast('Name already in use', true); return; }
+    mutate(() => Engine.addTeam(T, [a, b]));
+    toast(a + ' & ' + b + ' join from the next draw');
+    openTeamsSheet();
   });
 }
 
@@ -2479,7 +2973,7 @@ function openSettingsSheet() {
       <button data-v="0" class="${!c.useSkills ? 'on' : ''}">Off</button>
       <button data-v="1" class="${c.useSkills ? 'on' : ''}">On</button>
     </div>
-    <div class="setup-note">Set each player's badge in Menu → Players (+ stronger · • middle · − weaker). Unplayed rounds are redrawn instantly to avoid lopsided matches.</div>` : ''}
+    <div class="setup-note">Set each player's badge in Menu → ${c.fixedPairs ? 'Teams' : 'Players'} (+ stronger · • middle · − weaker).${c.fixedPairs ? ' A team’s strength is its two players combined.' : ''} Unplayed rounds are redrawn instantly to avoid lopsided matches.</div>` : ''}
     <div class="field-label">Sit-out compensation</div>
     <div class="seg" id="set-rest">
       <button data-m="none" class="${restMode === 'none' ? 'on' : ''}">None</button>
@@ -2532,6 +3026,7 @@ function openHelpSheet() {
     <h3>Rules &amp; help</h3>
     <div class="help-body">
       <p><b>Americano</b> — every round you get a new partner. A match is one long rally race: both teams' points add up to the match total (e.g. 14–10 in a 24-point match). You personally bank your team's score, win or lose. Highest individual total at the end wins.</p>
+      <p><b>Team Americano (fixed pairs)</b> — pick this under Americano at setup when everyone brings a fixed partner. Each pair stays together all session and rotates opponents; whole teams sit out when there aren't enough courts. Standings, the podium and stats are all by <b>team</b>. Add or remove a whole team mid-session from Menu → Teams.</p>
       <p><b>Mexicano</b> — round 1 is random; from round 2 the standings decide the draw: on each court, 1st+4th play 2nd+3rd of that group, so matches stay close.</p>
       <p><b>Serving</b> — one player serves <b>4 points in a row</b>, then the serve crosses to the other team. Partners take turns: each time the serve comes back to your team, the <em>other</em> partner serves. So a 24-point match goes: you serve 4 → opponent A serves 4 → your partner serves 4 → opponent B serves 4 → you again… until all points are played. Within your 4 serves, alternate service box (right, left, right, left) like normal padel. Who serves first? Spin a racket — it doesn't matter for the points. (If your group prefers 2-point serve turns, that's fine too — the app doesn't track serves.)</p>
       <p><b>Fair draws</b> — nobody sits out twice in a row, everyone's game count stays within ±1, and partners repeat only when mathematically unavoidable. Sit-out counts are shown next to resting players and in the standings.</p>
@@ -2712,7 +3207,7 @@ function standingsTableHTML(snap) {
   const hasRests = snap.rounds.some(r => r.resting && r.resting.length);
   return `
     <table class="stand-table">
-      <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(snap.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
+      <thead><tr><th></th><th>${snap.config.fixedPairs ? 'Team' : 'Player'}</th><th>${scoreUnitCap(snap.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
       <tbody>
         ${st.map((s, i) => `
           <tr class="top${i + 1}">
@@ -2777,7 +3272,12 @@ function bumpChartHTML(t, st, prog) {
 }
 
 function statHighlightsHTML(t, st, prog) {
+  const fixed = !!t.config.fixedPairs;
   const nm = pid => esc(Engine.playerName(t, pid));
+  // resolve a competitor id (player id, or team id in fixed-pairs mode) to its display name
+  const compName = id => { const r = st.find(s => s.player.id === id); return esc(r ? r.player.name : Engine.playerName(t, id)); };
+  // the player ids a competitor occupies in a match row (a team's two players, or itself)
+  const memberPids = id => fixed ? ((t.teams || []).find(tm => tm.id === id) || { players: [] }).players : [id];
   const card = (ico, label, big, sub) =>
     `<div class="stat-card"><div class="sc-ico">${ico}</div><div class="sc-label">${label}</div><div class="sc-big">${big}</div><div class="sc-sub">${sub}</div></div>`;
   const cards = [];
@@ -2792,10 +3292,10 @@ function statHighlightsHTML(t, st, prog) {
       const d = (first[s.player.id] ?? 0) - lastStep.rank[s.player.id]; // + = climbed up the table
       if (d > 0 && (!best || d > best.d)) best = { id: s.player.id, d };
     }
-    if (best) { climberId = best.id; cards.push(card('🚀', 'Biggest climber', nm(best.id), `up ${best.d} place${best.d > 1 ? 's' : ''} since round ${prog[0].round}`)); }
+    if (best) { climberId = best.id; cards.push(card('🚀', 'Biggest climber', compName(best.id), `up ${best.d} place${best.d > 1 ? 's' : ''} since round ${prog[0].round}`)); }
     else {
       const winner = lastStep.order[0];
-      if (prog.every(s => s.order[0] === winner)) cards.push(card('🏁', 'Wire to wire', nm(winner), `top of the table from round ${prog[0].round} on`));
+      if (prog.every(s => s.order[0] === winner)) cards.push(card('🏁', 'Wire to wire', compName(winner), `top of the table from round ${prog[0].round} on`));
     }
   }
 
@@ -2818,7 +3318,7 @@ function statHighlightsHTML(t, st, prog) {
       const gap = Math.round(played[i - 1].points) - Math.round(played[i].points);
       if (cf === null || gap < cf.gap) cf = { gap, a: played[i - 1].player.id, b: played[i].player.id };
     }
-    if (cf) cards.push(card('⚔️', 'Closest finish', `${nm(cf.a)} vs ${nm(cf.b)}`, cf.gap === 0 ? `dead level on ${scoreUnit(t.config)}` : `just ${cf.gap} ${t.config.scoring === 'games' ? 'game' : 'pt'}${cf.gap > 1 ? 's' : ''} apart`));
+    if (cf) cards.push(card('⚔️', 'Closest finish', `${compName(cf.a)} vs ${compName(cf.b)}`, cf.gap === 0 ? `dead level on ${scoreUnit(t.config)}` : `just ${cf.gap} ${t.config.scoring === 'games' ? 'game' : 'pt'}${cf.gap > 1 ? 's' : ''} apart`));
   }
 
   // late bloomer = biggest rank climb over the final stretch. Distinct from the
@@ -2843,10 +3343,11 @@ function statHighlightsHTML(t, st, prog) {
     if (lb) {
       // did the surge come from winning out? count their results in the window rounds
       let lbWon = 0, lbPlayed = 0;
+      const lbPids = memberPids(lb.id);
       for (const step of prog.slice(prog.length - W)) {
         for (const m of t.rounds[step.round - 1].matches) {
           if (m.scoreA === null || m.scoreB === null) continue;
-          const inA = m.teamA.includes(lb.id), inB = m.teamB.includes(lb.id);
+          const inA = lbPids.some(pid => m.teamA.includes(pid)), inB = lbPids.some(pid => m.teamB.includes(pid));
           if (!inA && !inB) continue;
           lbPlayed++;
           if ((inA ? m.scoreA : m.scoreB) > (inA ? m.scoreB : m.scoreA)) lbWon++;
@@ -2856,7 +3357,7 @@ function statHighlightsHTML(t, st, prog) {
       const sub = (lbPlayed > 0 && lbWon === lbPlayed)
         ? `won the last ${lbWon} to climb from ${ordinal(lb.from)} to ${ordinal(lb.to)}`
         : `up ${lb.gain} place${lb.gain > 1 ? 's' : ''} in the final ${W} rounds`;
-      cards.push(card('🌱', 'Late bloomer', nm(lb.id), sub));
+      cards.push(card('🌱', 'Late bloomer', compName(lb.id), sub));
     }
   }
 
@@ -2886,7 +3387,7 @@ function h2hMatrixHTML(t, st, h2h) {
   return `
     <div class="sv-block">
       <div class="sv-title">Head to head</div>
-      <div class="sv-sub">Net points when two players were on opposing teams — <span style="color:var(--lime)">green ahead</span>, <span style="color:var(--red)">red behind</span>. Columns are the numbered players.</div>
+      <div class="sv-sub">Net points when two ${t.config.fixedPairs ? 'teams faced each other' : 'players were on opposing teams'} — <span style="color:var(--lime)">green ahead</span>, <span style="color:var(--red)">red behind</span>. Columns are the numbered ${t.config.fixedPairs ? 'teams' : 'players'}.</div>
       <div class="h2h-scroll">
         <table class="h2h-matrix">
           <thead><tr><th class="h2h-corner"></th>${head}</tr></thead>
@@ -2940,6 +3441,7 @@ function slimSnapshot(t) {
     createdAt: t.createdAt || null,
     config: t.config,
     players: t.players.map(p => ({ id: p.id, name: p.name, active: p.active, arrived: p.arrived })),
+    teams: t.teams ? t.teams.map(tm => ({ id: tm.id, players: tm.players.slice() })) : undefined,
     rounds: t.rounds.filter(r => Engine.anyScores(r)).map(r => ({
       matches: r.matches.map(m => ({ teamA: m.teamA, teamB: m.teamB, scoreA: m.scoreA, scoreB: m.scoreB })),
       resting: r.resting || [],
@@ -2969,6 +3471,7 @@ function compactSnapshot(t) {
   const idx = {}; slim.players.forEach((p, i) => { idx[p.id] = i; });
   const c = slim.config;
   const cfg = { n: c.name, f: c.format, s: c.scoring, k: c.ranking, r: c.restMode, p: c.pointsPerMatch, g: c.gamesTarget };
+  if (c.fixedPairs) cfg.x = 1;
   const names = slim.players.map(p => p.name);
   const inactive = [], pending = [];
   slim.players.forEach((p, i) => { if (p.active === false) inactive.push(i); if (p.arrived === false) pending.push(i); });
@@ -2976,20 +3479,25 @@ function compactSnapshot(t) {
     r.matches.map(m => [idx[m.teamA[0]], idx[m.teamA[1]], idx[m.teamB[0]], idx[m.teamB[1]], m.scoreA, m.scoreB]),
     (r.resting || []).map(pid => idx[pid]),
   ]);
-  return [2, slim.createdAt || 0, cfg, names, rounds, inactive, pending];
+  // fixed pairs: teams as [idxA, idxB] pairs so the shared view can rebuild team standings
+  const teams = (slim.teams || []).map(tm => tm.players.map(pid => idx[pid]));
+  return [2, slim.createdAt || 0, cfg, names, rounds, inactive, pending, teams];
 }
 function expandCompact(a) {
   if (!Array.isArray(a) || a[0] !== 2) throw new Error('unsupported version');
-  const [, createdAt, cfg, names, rounds, inactive = [], pending = []] = a;
+  const [, createdAt, cfg, names, rounds, inactive = [], pending = [], teams = []] = a;
   const config = { name: cfg.n, format: cfg.f, scoring: cfg.s, ranking: cfg.k, restMode: cfg.r, pointsPerMatch: cfg.p, gamesTarget: cfg.g };
+  if (cfg.x) config.fixedPairs = true;
   const players = names.map((name, i) => ({ id: String(i), name, active: !inactive.includes(i), arrived: !pending.includes(i) }));
-  return {
+  const snap = {
     v: 1, createdAt: createdAt || null, config, players,
     rounds: rounds.map(([ms, rest]) => ({
       matches: ms.map(m => ({ teamA: [String(m[0]), String(m[1])], teamB: [String(m[2]), String(m[3])], scoreA: m[4], scoreB: m[5] })),
       resting: (rest || []).map(String),
     })),
   };
+  if (cfg.x) snap.teams = teams.map((pr, i) => ({ id: 'tm' + i, players: [String(pr[0]), String(pr[1])] }));
+  return snap;
 }
 function encodeShare(t) { return b64urlEncode(new TextEncoder().encode(JSON.stringify(compactSnapshot(t)))); }
 function decodeShare(str) {
@@ -3063,7 +3571,7 @@ function renderResults() {
         </div>
       </div>
       <table class="stand-table">
-        <thead><tr><th></th><th>Player</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
+        <thead><tr><th></th><th>${T.config.fixedPairs ? 'Team' : 'Player'}</th><th>${scoreUnitCap(T.config)}</th><th>±</th><th>W·D·L</th>${hasRests ? '<th>Rest</th>' : ''}</tr></thead>
         <tbody>
           ${st.map((s, i) => `
             <tr class="top${i + 1}">

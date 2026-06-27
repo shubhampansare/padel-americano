@@ -17,6 +17,7 @@ a deploy against the live build.
 | `immutability.fuzz.cjs` | No menu operation (add/remove player, courts, skills, planned rounds, arrivals, no-shows, reactivate) ever changes a round being played or already played. | `node tests/fuzz/immutability.fuzz.cjs [seeds=8000]` | `VIOLATIONS: 0` |
 | `partner-repeats.fuzz.cjs` | Americano produces no avoidable partner repeat in any feasible config (players/courts/rounds × skills × scoring). Mexicano reported only (repeats by design). | `node tests/fuzz/partner-repeats.fuzz.cjs [seeds=3000]` | all assert-zero configs `0.00%` |
 | `menu-churn.fuzz.cjs` | Interleaving *every* menu option mid-tournament never introduces an **avoidable** repeated pair. Classifies each repeat as avoidable (bug) vs forced-by-played-rounds (not a bug). | `node tests/fuzz/menu-churn.fuzz.cjs [file=index.html] [seeds=2500]` | `AVOIDABLE (bug): 0` |
+| `fixedpairs.fuzz.cjs` | Fixed-pairs (team) Americano: under add/remove/rejoin-team, skill, courts, planned-rounds & score churn, the round on court (or any played round) never changes, partners are never split, and clean draws have no avoidable team rematch. | `node tests/fuzz/fixedpairs.fuzz.cjs [seeds=6000]` | `IMMUTABILITY 0`, `PARTNER-SPLIT 0`, `REMATCH 0` |
 
 ## Verifying the live deployment
 
