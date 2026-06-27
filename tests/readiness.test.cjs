@@ -87,7 +87,9 @@ console.log('\n== Readiness / late-arrivals ==');
   ok(rows.length === 8, '3: standings lists only the 8 arrived (got ' + rows.length + ')');
 }
 
-// 4. Marking latecomers in before round 2 redraws round 2 to include them.
+// 4. Checking latecomers in: the current round stays FROZEN (v24); they join the next
+//    provisional round. The UI's advance flow folds them into the upcoming round via
+//    regenerateRound — markArrived alone never reshuffles the round on court.
 {
   const t = partial({});
   const rng = mulberry32(3);
@@ -97,7 +99,14 @@ console.log('\n== Readiness / late-arrivals ==');
   E.pendingPlayers(t).slice().forEach(p => E.markArrived(t, p.id, rng));
   ok(E.activePlayers(t).length === 12, '4: all 12 active after check-in');
   ok(E.pendingPlayers(t).length === 0, '4: no pending after check-in');
-  ok(t.rounds[1].resting.length === 4, '4: round 2 redrawn with 12 players -> 4 rest (got ' + t.rounds[1].resting.length + ')');
+  // v24 freeze: round 2 is the round on court (first incomplete) — a bare check-in must not
+  // reshuffle it. The latecomers appear from the next provisional round instead.
+  ok(t.rounds[1].resting.length === 0, '4: current round 2 stays frozen on check-in (got ' + t.rounds[1].resting.length + ')');
+  ok(t.rounds[2].resting.length === 4, '4: next provisional round folds in all 12 -> 4 rest (got ' + t.rounds[2].resting.length + ')');
+  // the explicit advance action (regenerateRound, as the readiness sheet does) folds the
+  // latecomers into the upcoming round on purpose.
+  E.regenerateRound(t, 1, rng);
+  ok(t.rounds[1].resting.length === 4, '4: regenerateRound folds latecomers into round 2 -> 4 rest (got ' + t.rounds[1].resting.length + ')');
 }
 
 // 5. Round 3 is blocked while pending exists; allowed once cleared (Mexicano).
